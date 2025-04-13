@@ -7,7 +7,11 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoModelForCausalLM
 )
+from auto_gptq import AutoGPTQForCausalLM
 from sentence_transformers import SentenceTransformer
+
+model = AutoGPTQForCausalLM.from_quantized("TheBloke/Mistral-7B-Instruct-v0.1-GPTQ", device="cuda")
+print("Model loaded successfully on GPU.")
 
 load_dotenv()  # Load environment variables from .env
 
@@ -25,14 +29,18 @@ MODELS = {
     "sentence-transformers/all-MiniLM-L6-v2": "all-MiniLM-L6-v2",
     "sentence-transformers/all-mpnet-base-v2": "all-mpnet-base-v2",
     "gpt2": "gpt2",
-    "HuggingFaceH4/zephyr-7b-beta": "zephyr-7b-beta",
+    #"HuggingFaceH4/zephyr-7b-beta": "zephyr-7b-beta",
     "deepset/roberta-base-squad2": "roberta-base-squad2",
     "bert-large-uncased-whole-word-masking-finetuned-squad": "bert-large-squad",
     "mistralai/Mistral-7B-v0.1": "mistral-7b",
     "EleutherAI/gpt-j-6B": "gpt-j-6b",
-    "allenai/longformer-base-4096": "longformer-base-4096",
-    "distilbert-base-uncased": "distilbert-base-uncased",
-    "roberta-base": "roberta-base"
+    #"allenai/longformer-base-4096": "longformer-base-4096",
+    #"distilbert-base-uncased": "distilbert-base-uncased",
+    "roberta-base": "roberta-base",
+    #"allenai/scibert_scivocab_uncased": "scibert-scivocab-uncased",
+    #"google/bigbird-roberta-base": "bigbird-roberta-base",
+    "TheBloke/gpt-j-6B-GPTQ": "gpt-j-6b-gptq",
+    "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ": "mistral-7b-gptq",
 }
 
 
@@ -52,10 +60,17 @@ def download_and_save_model(model_name, local_name):
     if "sentence-transformers" in model_name:
         model = SentenceTransformer(model_name)
         model.save(local_path)
+    elif "GPTQ" in model_name:
+        model = AutoGPTQForCausalLM.from_quantized(model_name, device="cpu")  # 👈 load quantized model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model.save_pretrained(local_path)
+        tokenizer.save_pretrained(local_path)
     else:
         if "squad" in model_name or "longformer" in model_name:  # QA and extractive models
             model = AutoModelForQuestionAnswering.from_pretrained(model_name)
         elif "gpt" in model_name or "zephyr" in model_name or "mistral" in model_name:  # Text generation models
+            model = AutoModelForCausalLM.from_pretrained(model_name)
+        elif "bigbird-pegasus" in model_name:  # BigBird-Pegasus is for summarization
             model = AutoModelForCausalLM.from_pretrained(model_name)
         else:  # General models
             model = AutoModel.from_pretrained(model_name)
