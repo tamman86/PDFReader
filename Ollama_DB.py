@@ -9,33 +9,19 @@ from langchain_huggingface import HuggingFaceEmbeddings
 CHROMA_BASE_PATH = "chroma"
 DATA_PATH = "data/books"
 
-
-def main():
-    files = [f for f in os.listdir(DATA_PATH) if f.endswith((".pdf", ".docx", ".md"))]
-
-    if not files:
-        print("No PDF or Word documents found in the directory.")
-        return
-
-    print("\nFound Documents:")
-    for i, file in enumerate(files, start=1):
-        print(f"  [{i}] {file}")
-
-    for i, file in enumerate(files, start=1):
-        print(f"\n🔍 Processing: {file}")
-
-        title = input(f"Enter the title for '{file}': ").strip()
-        revision = input(f"Enter the revision name (e.g., v1, v2, latest) for '{file}': ").strip()
-
-        file_path = os.path.join(DATA_PATH, file)
-        process_document(file_path, title, revision)
-
-
 def process_document(file_path, title, revision):
-    documents = load_document(file_path)
-    chunks = split_text(documents)
-    save_to_chroma(chunks, title, revision)
+    #documents = load_document(file_path)
+    #chunks = split_text(documents)
+    #save_to_chroma(chunks, title, revision)
 
+    documents = load_document(file_path)
+    chunk_sizes = [300, 500, 700, 1000]
+    for chunk in chunk_sizes:
+        chunks = split_text(documents, chunk)
+        mod_title = title + str(chunk) + "chunks"
+        save_to_chroma(chunks, mod_title, revision)
+
+''' Breakdown of accepted formats'''
 
 def load_document(file_path):
     if file_path.endswith(".pdf"):
@@ -53,15 +39,13 @@ def load_document(file_path):
 
     return loader.load()
 
-
-def split_text(documents: list[Document]):
+def split_text(documents: list[Document], chunk):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300, chunk_overlap=100, length_function=len, add_start_index=True
+        chunk_size=chunk, chunk_overlap=chunk * .35, length_function=len, add_start_index=True
     )
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} pages into {len(chunks)} chunks.")
     return calculate_chunk_ids(chunks)
-
 
 def calculate_chunk_ids(chunks):
     last_page_id = None
