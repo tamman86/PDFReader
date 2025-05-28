@@ -41,7 +41,7 @@ def load_document(file_path):
 
 def split_text(documents: list[Document], chunk):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk, chunk_overlap=chunk * .35, length_function=len, add_start_index=True
+        chunk_size=chunk, chunk_overlap=chunk * .4, length_function=len, add_start_index=True
     )
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} pages into {len(chunks)} chunks.")
@@ -92,6 +92,3 @@ def save_to_chroma(chunks: list[Document], title, revision, batch_size=150):
     else:
         print("No new documents to add")
 
-
-if __name__ == "__main__":
-    main()

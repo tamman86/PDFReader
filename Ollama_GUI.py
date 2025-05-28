@@ -8,25 +8,57 @@ from Ollama_Readerv2 import list_databases
 class DocumentDatabaseGUI:
     def __init__(self, root):
         self.root = root
+
+        # GUI Window title
         self.root.title("Document Database Manager")
 
+        # GUI sub-window 1
         self.create_db_frame = tk.LabelFrame(root, text="Create Database", padx=10, pady=10)
         self.create_db_frame.pack(padx=10, pady=5, fill="x")
 
+        # First Line in sub-window 1
         tk.Label(self.create_db_frame, text="Select File:").grid(row=0, column=0, sticky="w")
-        self.file_path_entry = tk.Entry(self.create_db_frame, width=50)
+        self.file_path_entry = tk.Entry(self.create_db_frame, width=40)
         self.file_path_entry.grid(row=0, column=1, padx=5)
         tk.Button(self.create_db_frame, text="Browse", command=self.browse_file).grid(row=0, column=2)
 
+        '''
+        title_frame = tk.Frame(self.create_db_frame)
+        title_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+        tk.Label(title_frame, text="Document Title:").grid(row=0, column=0, sticky="w")
+        self.title_entry = tk.Entry(title_frame, width=40)
+        self.title_entry.grid(row=0, column=1, padx=5)
+        '''
+
         tk.Label(self.create_db_frame, text="Title:").grid(row=1, column=0, sticky="w")
-        self.title_entry = tk.Entry(self.create_db_frame, width=30)
+        self.title_entry = tk.Entry(self.create_db_frame, width=40)
         self.title_entry.grid(row=1, column=1, padx=5)
 
+        '''
+        revision_frame = tk.Frame(self.create_db_frame)
+        revision_frame.grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        tk.Label(revision_frame, text="Document Revision:").grid(row=0, column=0, sticky="w")
+        self.revision_entry = tk.Entry(revision_frame, width=40)
+        self.revision_entry.grid(row=0, column=1, padx=5)
+        '''
+
         tk.Label(self.create_db_frame, text="Revision:").grid(row=2, column=0, sticky="w")
-        self.revision_entry = tk.Entry(self.create_db_frame, width=30)
+        self.revision_entry = tk.Entry(self.create_db_frame, width=40)
         self.revision_entry.grid(row=2, column=1, padx=5)
 
-        tk.Button(self.create_db_frame, text="Create Database", command=self.create_database).grid(row=3, column=1, pady=5)
+        # Nested Frame for Chunk Size & Chunk Overlap
+        chunk_frame = tk.Frame(self.create_db_frame)
+        chunk_frame.grid(row=3, column=0, columnspan=3, sticky="w", pady=2)
+
+        tk.Label(chunk_frame, text="Chunk Size:").grid(row=0, column=0, sticky="w")
+        self.chunk_size_entry = tk.Entry(chunk_frame, width=10)  # Unique name, adjusted width
+        self.chunk_size_entry.grid(row=0, column=1, padx=5)
+
+        tk.Label(chunk_frame, text="Chunk Overlap:").grid(row=0, column=2, sticky="w", padx=(10, 0))  # Add left padding
+        self.chunk_overlap_entry = tk.Entry(chunk_frame, width=10)  # Unique name, adjusted width
+        self.chunk_overlap_entry.grid(row=0, column=3, padx=5)
+
+        tk.Button(self.create_db_frame, text="Create Database", command=self.create_database).grid(row=4, column=1, pady=5)
 
         self.query_frame = tk.LabelFrame(root, text="Query Database", padx=10, pady=10)
         self.query_frame.pack(padx=10, pady=5, fill="x")
