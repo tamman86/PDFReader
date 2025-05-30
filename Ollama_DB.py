@@ -1,7 +1,7 @@
 import os
 import shutil
 from langchain_community.document_loaders import DirectoryLoader, PyMuPDFLoader, UnstructuredWordDocumentLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter, NLTKTextSplitter
 from langchain.schema import Document
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -9,7 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 CHROMA_BASE_PATH = "chroma"
 DATA_PATH = "data/books"
 
-def process_document(file_path, title, revision):
+def process_document(file_path, title, revision, chunk_size, sentence_split):
     #documents = load_document(file_path)
     #chunks = split_text(documents)
     #save_to_chroma(chunks, title, revision)
@@ -17,8 +17,12 @@ def process_document(file_path, title, revision):
     documents = load_document(file_path)
     chunk_sizes = [300, 500, 700, 1000]
     for chunk in chunk_sizes:
-        chunks = split_text(documents, chunk)
-        mod_title = title + str(chunk) + "chunks"
+        if sentence_split:
+            chunks = sentence_split_text(documents, chunk)
+            mod_title = title + str(chunk) + "chunks/sentence_split"
+        else:
+            chunks = split_text(documents, chunk)
+            mod_title = title + str(chunk) + "chunks"
         save_to_chroma(chunks, mod_title, revision)
 
 ''' Breakdown of accepted formats'''
@@ -41,11 +45,23 @@ def load_document(file_path):
 
 def split_text(documents: list[Document], chunk):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk, chunk_overlap=chunk * .4, length_function=len, add_start_index=True
+        chunk_size=chunk, chunk_overlap=int(chunk * .4), length_function=len, add_start_index=True
     )
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} pages into {len(chunks)} chunks.")
     return calculate_chunk_ids(chunks)
+
+
+def sentence_split_text(documents: list[Document], chunk):
+    sentence_splitter = NLTKTextSplitter()
+    sentence_chunks = sentence_splitter.split_documents(documents)
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk, chunk_overlap=int(chunk * .4), length_function=len, add_start_index=True
+    )
+    final_chunks = text_splitter.split_documents(sentence_chunks)
+    print(f"Split {len(documents)} pages into {len(final_chunks)} chunks.")
+    return calculate_chunk_ids(final_chunks)
 
 def calculate_chunk_ids(chunks):
     last_page_id = None

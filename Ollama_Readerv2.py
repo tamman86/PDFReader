@@ -32,8 +32,7 @@ For generator:
     6 = GPT-J-6B
 '''
 
-generator = 2
-
+generator = 6
 
 
 BASE_CHROMA_PATH = "chroma"
@@ -307,6 +306,9 @@ def main():
     elif generator == 5:
         generator_model_path = "local_models/mistral-7b-OpenHermes"
         response_text = quant_model(generator_model_path, generator_prompt, temperature)
+    elif generator == 6:
+        generator_model_path = "local_models/gpt-j-6b"
+        response_text = full_model(generator_model_path, generator_prompt, temperature)
 
     print(f"Generator Output:\n{response_text}")
 

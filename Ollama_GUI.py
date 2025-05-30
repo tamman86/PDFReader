@@ -4,6 +4,8 @@ import threading
 import os
 from Ollama_DB import process_document
 from Ollama_Readerv2 import list_databases
+import nltk
+import traceback
 
 class DocumentDatabaseGUI:
     def __init__(self, root):
@@ -54,9 +56,13 @@ class DocumentDatabaseGUI:
         self.chunk_size_entry = tk.Entry(chunk_frame, width=10)  # Unique name, adjusted width
         self.chunk_size_entry.grid(row=0, column=1, padx=5)
 
-        tk.Label(chunk_frame, text="Chunk Overlap:").grid(row=0, column=2, sticky="w", padx=(10, 0))  # Add left padding
-        self.chunk_overlap_entry = tk.Entry(chunk_frame, width=10)  # Unique name, adjusted width
-        self.chunk_overlap_entry.grid(row=0, column=3, padx=5)
+        self.sentence_split_var = tk.BooleanVar(value=False)
+        self.sentence_split_checkbox = tk.Checkbutton(
+            chunk_frame,
+            text = "Sentence Split",
+            variable=self.sentence_split_var
+        )
+        self.sentence_split_checkbox.grid(row=0, column=3, padx=5)
 
         tk.Button(self.create_db_frame, text="Create Database", command=self.create_database).grid(row=4, column=1, pady=5)
 
@@ -96,19 +102,22 @@ class DocumentDatabaseGUI:
         file_path = self.file_path_entry.get().strip()
         title = self.title_entry.get().strip()
         revision = self.revision_entry.get().strip()
+        chunk_size = self.chunk_size_entry.get().strip()
+        sentence_split = self.sentence_split_var.get()
 
         if not file_path or not title or not revision:
             messagebox.showerror("Error", "All fields are required.")
             return
 
-        threading.Thread(target=self.process_creation, args=(file_path, title, revision), daemon=True).start()
+        threading.Thread(target=self.process_creation, args=(file_path, title, revision, chunk_size, sentence_split), daemon=True).start()
 
-    def process_creation(self, file_path, title, revision):
+    def process_creation(self, file_path, title, revision, chunk_size, sentence_split):
         try:
-            process_document(file_path, title, revision)
+            process_document(file_path, title, revision, chunk_size, sentence_split)
             messagebox.showinfo("Success", "Database created successfully!")
             self.load_databases()
         except Exception as e:
+            traceback.print_exc()
             messagebox.showerror("Error", f"Failed to create database: {e}")
 
     def load_databases(self):
@@ -148,6 +157,10 @@ class DocumentDatabaseGUI:
             messagebox.showerror("Error", f"Query failed: {e}")
 
 if __name__ == "__main__":
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
     root = tk.Tk()
     app = DocumentDatabaseGUI(root)
     root.mainloop()
