@@ -61,31 +61,41 @@ def list_databases():
 
 def full_model(generator_model_path, generator_prompt, temperature):
     tokenizer = AutoTokenizer.from_pretrained(generator_model_path, local_files_only=True, padding_side="left")
-    model = AutoModelForCausalLM.from_pretrained(generator_model_path, local_files_only=True)
-    input_ids = tokenizer.encode(generator_prompt, return_tensors="pt")
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    model = AutoModelForCausalLM.from_pretrained(generator_model_path, local_files_only=True).to("cuda")
+
+    inputs = tokenizer(generator_prompt, return_tensors="pt", padding = True, truncation = True)
+    input_ids = inputs["input_ids"].to("cuda")
+    attention_mask = inputs["attention_mask"].to("cuda")
 
     for searchTechnique in range(2):
         if searchTechnique == 0:
             print("Sampling based text generation:")
             output_ids = model.generate(
-                input_ids,
+                input_ids = input_ids,
+                attention_mask = attention_mask,
                 max_new_tokens=50,  # or whatever you choose
                 temperature=temperature,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.pad_token_id
             )
         elif searchTechnique == 1:
             print("Beam search based text generation:")
             output_ids = model.generate(
-                input_ids,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=50,
                 num_beams=4,
                 early_stopping=True,
                 repetition_penalty=1.2,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id
+                #eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id
             )
 
         response_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
