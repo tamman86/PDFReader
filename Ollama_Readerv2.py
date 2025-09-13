@@ -3,8 +3,10 @@ import argparse
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from transformers import pipeline, AutoModelForQuestionAnswering, AutoTokenizer, AutoModelForCausalLM
-from auto_gptq import AutoGPTQForCausalLM
-import ollama
+from langchain_community.llms import LlamaCpp
+from chromadb.config import Settings
+from langchain_community.llms import CTransformers
+from sentence_transformers.cross_encoder import CrossEncoder
 
 '''
 For testing extractor-generator combinations
@@ -30,9 +32,10 @@ For generator:
     4 = Mistral-7b 
     5 = Mistral-7b 
     6 = GPT-J-6B
+    7 = Bertin-GPT-J-6b
 '''
 
-generator = 6
+generator = 3
 
 
 BASE_CHROMA_PATH = "chroma"
@@ -72,56 +75,53 @@ def full_model(generator_model_path, generator_prompt, temperature):
     input_ids = inputs["input_ids"].to("cuda")
     attention_mask = inputs["attention_mask"].to("cuda")
 
-    for searchTechnique in range(2):
-        if searchTechnique == 0:
-            print("Sampling based text generation:")
-            output_ids = model.generate(
-                input_ids = input_ids,
-                attention_mask = attention_mask,
-                max_new_tokens=50,  # or whatever you choose
-                temperature=temperature,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                pad_token_id=tokenizer.pad_token_id
-            )
-        elif searchTechnique == 1:
-            print("Beam search based text generation:")
-            output_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=50,
-                num_beams=4,
-                early_stopping=True,
-                repetition_penalty=1.2,
-                #eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id
-            )
 
-        response_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        return response_text
-
-def quant_model(generator_model_path, generator_prompt, temperature):
-    tokenizer = AutoTokenizer.from_pretrained(generator_model_path, local_files_only=True, use_fast=True)
-    model = AutoGPTQForCausalLM.from_quantized(
-        generator_model_path,
-        device="cuda:0",  # or "cpu" if you're not using GPU
-        use_safetensors=True,
-        local_files_only=True,
-        trust_remote_code=True,
-        disable_exllamav2=True,
-        inject_fused_attention=False,
-        inject_fused_mlp=False
-    )
-    inputs = tokenizer(generator_prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=256,
+    print("Sampling based text generation:")
+    output_ids = model.generate(
+        input_ids = input_ids,
+        attention_mask = attention_mask,
+        max_new_tokens=128,  # or whatever you choose
+        temperature=temperature,
         do_sample=True,
-        temperature=temperature  # You already have a temperature variable in use
+        top_k=50,
+        top_p=0.95,
+        pad_token_id=tokenizer.pad_token_id
     )
-    deepseek_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return deepseek_output
+
+    prompt_length = input_ids.shape[1]
+    generated_text = tokenizer.decode(output_ids[0, prompt_length:], skip_special_tokens=True)
+    print(generated_text)
+    #return generated_text
+
+def gguf_model(generator_model_path, generator_prompt, temperature):
+    """
+    Loads and runs a GGUF model using the reliable llama-cpp-python library.
+    """
+    # Find the actual .gguf file in the model directory
+    gguf_file = [f for f in os.listdir(generator_model_path) if f.endswith(".gguf")]
+    if not gguf_file:
+        raise RuntimeError(f"No .gguf file found in {generator_model_path}")
+
+    gguf_file_path = os.path.join(generator_model_path, gguf_file[0])
+
+    print(f"Loading GGUF model from: {gguf_file_path}")
+    llm = LlamaCpp(
+        model_path=gguf_file_path,
+        # -1 means offload all possible layers to the GPU
+        n_gpu_layers=-1,
+        # The number of tokens to process in parallel
+        n_batch=512,
+        # The maximum context size the model can handle
+        n_ctx=4096,
+        # We pass generation parameters directly when we call the model
+        temperature=temperature,
+        max_tokens=512,
+        # Set to True to display detailed C++-level performance info
+        verbose=False,
+    )
+    print("Generating response with LlamaCpp (GGUF)...")
+    response = llm.invoke(generator_prompt)
+    return response
 
 def format_sources(sources):
     formatted_sources = [
@@ -144,42 +144,108 @@ def main():
     relevance_threshold = args.relevance
     temperature = args.temperature
 
-    embedding_function = HuggingFaceEmbeddings(model_name="local_models/all-mpnet-base-v2")
+    embedding_function = HuggingFaceEmbeddings(model_name="local_models/bge-large-en-v1.5")
+
     databases = list_databases()
+    print(f"DEBUG: list_databases() found: {databases}")   ####################################
     if not databases:
         return
 
+    # Define the setting to disable telemetry
+    chroma_settings = Settings(anonymized_telemetry=False)
+
     if selected_db == "All":
-        dbs = [Chroma(persist_directory=os.path.join(BASE_CHROMA_PATH, db), embedding_function=embedding_function) for
-               db in databases]
+        # --- ADD A PRINT STATEMENT INSIDE THIS LIST COMPREHENSION (requires changing to a loop) ---
+        print("DEBUG: Loading ALL databases...")
+        dbs = []
+        for db_name in databases:
+            db_path = os.path.join(BASE_CHROMA_PATH, db_name)
+            print(f"  -> Attempting to load DB from: '{db_path}'")
+            dbs.append(Chroma(persist_directory=db_path, embedding_function=embedding_function))
+    else:
+        db_path = os.path.join(BASE_CHROMA_PATH, selected_db)
+        # --- ADD THIS LINE ---
+        print(f"DEBUG: Attempting to load SINGLE DB from: '{db_path}'")
+        if not os.path.exists(db_path):
+            print(f"DEBUG: ERROR - Path does not exist: '{db_path}'")
+            return
+        dbs = [Chroma(persist_directory=db_path, embedding_function=embedding_function)]
+
+    '''
+    if selected_db == "All":
+        dbs = [Chroma(
+            persist_directory=os.path.join(BASE_CHROMA_PATH, db),
+            embedding_function=embedding_function,
+            client_settings=chroma_settings
+        ) for db in databases]
     else:
         db_path = os.path.join(BASE_CHROMA_PATH, selected_db)
         if not os.path.exists(db_path):
             return
-        dbs = [Chroma(persist_directory=db_path, embedding_function=embedding_function)]
+        dbs = [Chroma(
+            persist_directory=db_path,
+            embedding_function=embedding_function,
+            client_settings=chroma_settings
+        )]
+    '''
 
-    results = []
-    sources = []
+    # --- ADD THIS ENTIRE BLOCK ---
+    print("\nDEBUG: Verifying content of loaded databases...")
+    if not dbs:
+        print("  -> ERROR: The 'dbs' list is empty. No databases were loaded.")
+    for i, db in enumerate(dbs):
+        try:
+            count = db._collection.count()
+            print(f"  -> DB #{i + 1}: Contains {count} document chunks.")
+            if count == 0:
+                print("  -> WARNING: This database appears to be empty!")
+        except Exception as e:
+            print(f"  -> ERROR checking DB #{i + 1}: {e}")
+    print("-" * 30)
+    # --- END OF ADDED BLOCK ---
+
+    print("Step 1: Retrieving diverse document chunks with MMR...")
+    results_with_scores = []
     for db in dbs:
-        search_results = db.similarity_search_with_relevance_scores(query_text, k=3)
-        results.extend(search_results)
-        for doc, _ in search_results:
-            sources.append(doc.metadata.get("source", "Unknown source"))
-    results.sort(key=lambda x: x[1], reverse=True)
+        # Use the direct similarity search to get a larger pool of candidates for the re-ranker.
+        # We'll get 20 chunks to give the re-ranker a good selection to choose from.
+        results_with_scores.extend(db.similarity_search_with_relevance_scores(query_text, k=20))
 
-    '''
-    for doc, score in results:
-        print(f"Chunk Score: {score}, Content: {doc.page_content[:300]}")
-    '''
+    # Remove duplicates based on page content, keeping the one with the highest score.
+    unique_docs_map = {}
+    for doc, score in results_with_scores:
+        if doc.page_content not in unique_docs_map or score > unique_docs_map[doc.page_content][1]:
+            unique_docs_map[doc.page_content] = (doc, score)
 
-    if not results or results[0][1] < relevance_threshold:
-        print("No relevant results extracted")
+    # We only need the documents themselves for the re-ranker, not the initial scores.
+    unique_docs = [doc for doc, score in unique_docs_map.values()]
+
+    print("Step 2: Re-ranking retrieved chunks for best relevance...")
+    reranker_model = CrossEncoder('local_models/bge-reranker-large', max_length=512)
+
+    pairs = [[query_text, doc.page_content] for doc in unique_docs]
+
+    if not pairs:
+        print("No documents were retrieved. Aborting.")
         return
 
+    reranker_scores = reranker_model.predict(pairs)
+
+    reranked_results = list(zip(reranker_scores, unique_docs))
+    reranked_results.sort(key=lambda x: x[0], reverse=True)
+
+    # Re-format into the [(doc, score), ...] structure the rest of the script expects
+    results = [(doc, score) for score, doc in reranked_results]
+
+    if not results or results[0][1] < relevance_threshold:
+        print("No relevant results found after re-ranking, or top score is below threshold.")
+        return
+
+    print("Step 3: Extracting specific answers from top 3 re-ranked chunks...")
     top_results = results[:3]
     top_extractions = []
 
-    models = [3, 4, 5, 11]
+    models = [3, 11]
     for i in models:
         extractor = i
         try:
@@ -273,31 +339,36 @@ def main():
 
 
                 except Exception as e:
-                    print(f"Extractor {extractor_model_path} failed on chunk:\n{str(e)}")
+                    print(f"Extractor {extractor_model_path} failed on chunk. Error: {e}")
 
         except:
-            print("Extraction failed for: " + extractor_model_path)
+            print(f"Extraction failed for: {extractor_model_path}. Error: {e}")
 
     top_extractions.sort(key=lambda x: x["final_score"], reverse=True)
 
     top_3_for_generation = top_extractions[:3]
 
-    spans_for_prompt = "\n".join(
-        [f"{i + 1}. {e['span']}" for i, e in enumerate(top_3_for_generation)]
+    # If no extractions were made, you can't generate an answer.
+    if not top_3_for_generation:
+        print("Could not extract any specific answer spans to generate a final response.")
+        return
+
+    # List of extracted facts
+    context_for_prompt = "\n".join(
+        [f"{i + 1}. {extraction['span']}" for i, extraction in enumerate(top_3_for_generation)]
     )
 
-    best_chunk = top_extractions[0]["chunk"]
+    # A much cleaner and more direct prompt template.
+    generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent answer. Do not use any information not provided below.
 
-    generator_prompt = f"""You are an engineering assistant AI. Given a user query and extracted document spans, generate a clear and technically accurate answer suitable for an engineer. Do not include code.
+    USER'S QUESTION:
+    "{query_text}"
 
-    Context from document:
-    {best_chunk}
-        
-    Q: {query_text}
-    The following answers were extracted from relevant documents:
-    {spans_for_prompt}
+    RELEVANT EXTRACTED INFORMATION:
+    {context_for_prompt}
 
-    A:"""
+    Based ONLY on the information above, provide a comprehensive and coherent answer:
+    """
 
     print("\n🧠 Prompt to Generator:\n", generator_prompt)
 
@@ -306,19 +377,22 @@ def main():
         response_text = full_model(generator_model_path, generator_prompt, temperature)
     elif generator == 2:
         generator_model_path = "local_models/deepseek-7b-gptq"
-        response_text = quant_model(generator_model_path, generator_prompt, temperature)
+        response_text = gguf_model(generator_model_path, generator_prompt, temperature)
     elif generator == 3:
-        generator_model_path = "local_models/mistral-7b-gptq"
-        response_text = quant_model(generator_model_path, generator_prompt, temperature)
+        generator_model_path = "local_models/mistral-7b-gguf"
+        response_text = gguf_model(generator_model_path, generator_prompt, temperature)
     elif generator == 4:
         generator_model_path = "local_models/mistral-7b-gpo"
-        response_text = quant_model(generator_model_path, generator_prompt, temperature)
+        response_text = gguf_model(generator_model_path, generator_prompt, temperature)
     elif generator == 5:
         generator_model_path = "local_models/mistral-7b-OpenHermes"
-        response_text = quant_model(generator_model_path, generator_prompt, temperature)
+        response_text = gguf_model(generator_model_path, generator_prompt, temperature)
     elif generator == 6:
         generator_model_path = "local_models/gpt-j-6b"
         response_text = full_model(generator_model_path, generator_prompt, temperature)
+    elif generator == 7:
+        generator_model_path = "local_models/bertin-gpt-j-6b"
+        response_text = gguf_model(generator_model_path, generator_prompt, temperature)
 
     print(f"Generator Output:\n{response_text}")
 

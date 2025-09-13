@@ -113,7 +113,7 @@ class DocumentDatabaseGUI:
 
     def process_creation(self, file_path, title, revision, chunk_size, sentence_split):
         try:
-            process_document(file_path, title, revision, chunk_size, sentence_split)
+            process_document(file_path, title, revision)
             messagebox.showinfo("Success", "Database created successfully!")
             self.load_databases()
         except Exception as e:

@@ -7,7 +7,7 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoModelForCausalLM
 )
-from optimum.gptq import GPTQModel
+#from optimum.gptq import GPTQModel
 from auto_gptq import AutoGPTQForCausalLM
 from sentence_transformers import SentenceTransformer
 import requests
@@ -35,15 +35,17 @@ MODELS = {
     "mistralai/Mistral-7B-v0.1": "mistral-7b",
     "EleutherAI/gpt-j-6B": "gpt-j-6b",
     "roberta-base": "roberta-base",
-    "TheBloke/gpt-j-6B-GPTQ": "gpt-j-6b-gptq",
-    "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ": "mistral-7b-gptq",
-    "TheBloke/DeepSeek-LLM-7B-GPTQ": "deepseek-7b-gptq",
-    "TheBloke/DeepSeek-LLM-7B-GGUF": "deepseek-7b-gguf",
+    #"TheBloke/gpt-j-6B-GPTQ": "gpt-j-6b-gptq",
+    #"TheBloke/Mistral-7B-Instruct-v0.1-GPTQ": "mistral-7b-gptq",
+    #"TheBloke/DeepSeek-LLM-7B-GPTQ": "deepseek-7b-gptq",
+    #"TheBloke/DeepSeek-LLM-7B-GGUF": "deepseek-7b-gguf",
     #"HuggingFaceH4/zephyr-7b-beta": "zephyr-7b-beta",
     #"allenai/longformer-base-4096": "longformer-base-4096",
     #"distilbert-base-uncased": "distilbert-base-uncased",
     #"allenai/scibert_scivocab_uncased": "scibert-scivocab-uncased",
     #"google/bigbird-roberta-base": "bigbird-roberta-base",
+    "BAAI/bge-large-en-v1.5": "bge-large-en-v1.5",
+    "BAAI/bge-reranker-large": "bge-reranker-large",
 }
 
 def download_and_save_model(model_name, local_name):
@@ -58,7 +60,7 @@ def download_and_save_model(model_name, local_name):
 
     os.makedirs(local_path, exist_ok=True)
 
-    if "sentence-transformers" in model_name:
+    if "sentence-transformers" in model_name or "bge-large-en" in model_name:
         model = SentenceTransformer(model_name)
         model.save(local_path)
     else:
