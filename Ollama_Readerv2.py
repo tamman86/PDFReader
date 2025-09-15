@@ -17,8 +17,15 @@ CONFIG = {
     },
     "generator_models": {
         "mistral-gguf": {
-            #"path": "local_models/mistral-7b-gguf",
             "path": "local_models/mistral-7b-instruct-v0.2-gguf",
+            "type": "gguf"
+        },
+        "zephyr-gguf": {
+            "path": "local_models/zephyr-7b-beta-gguf",
+            "type": "gguf"
+        },
+        "codellama-gguf": {
+            "path": "local_models/codellama-7b-instruct-gguf",
             "type": "gguf"
         }
     },
@@ -269,13 +276,15 @@ Ideal Search Query:
         top_extractions.sort(key=lambda x: x["final_score"], reverse=True)
         return top_extractions
 
-    # Generator prompt formation
+    # Tailored generator prompt formation
     def _generate_answer(self, query_text, top_extractions, generator_name, temperature):
         context_for_prompt = "\n".join(
             [f"{i + 1}. {ex['context']}" for i, ex in enumerate(top_extractions[:self.config["top_k_results"]])]
         )
 
-        generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent answer.
+        generator_prompt = ""
+        if generator_name == "mistral-gguf":
+            generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent, and precise answer.
 
 USER'S QUESTION:
 "{query_text}"
@@ -283,8 +292,35 @@ USER'S QUESTION:
 RELEVANT EXTRACTED INFORMATION:
 {context_for_prompt}
 
-Based ONLY on the information above, provide a comprehensive and coherent answer:
+Based ONLY on the information provided, provide a comprehensive and well-structured answer to the user's question.
 """
+
+        elif generator_name == "zephyr-gguf":
+            generator_prompt = f"""You are an expert explainer. Your task is to summarize the key findings from the following extracted information and explain the main concept in clear, easy-to-understand language.
+
+USER'S QUESTION:
+"{query_text}"
+
+RELEVANT EXTRACTED INFORMATION:
+{context_for_prompt}
+
+Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question.
+"""
+
+        elif generator_name == "codellama-gguf":
+            generator_prompt = f"""You are a senior software engineer and code analyst. Your task is to analyze the following extracted information to answer the user's question, which may be about code, logic, or technical procedures.
+
+USER'S QUESTION:
+"{query_text}"
+
+RELEVANT EXTRACTED INFORMATION:
+{context_for_prompt}
+
+Based ONLY on the information provided, explain the code or logic in detail. If appropriate, provide a clear, commented code example.
+"""
+        else:
+            generator_prompt = context_for_prompt  # Fallback to just context
+
         print("\n🧠 Prompt to Generator:\n", generator_prompt)
         llm = self.get_generator_llm(generator_name, temperature)
         return llm.invoke(generator_prompt)

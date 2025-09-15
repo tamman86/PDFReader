@@ -21,6 +21,9 @@ class DocumentDatabaseGUI:
         self.rag_pipeline = RAGPipeline(READER_CONFIG)
         print("✅ Pipelines initialized.")
 
+        # Variable for selected generator (Mistral default)
+        self.selected_generator_model = tk.StringVar(value="mistral-gguf")
+
         # UI Setup
         # 1. Database Creation Frame
         self.create_db_frame = tk.LabelFrame(root, text="1. Create or Re-build a Database", padx=10, pady=10)
@@ -107,6 +110,25 @@ class DocumentDatabaseGUI:
             text="Query Transform Assist? (Slower, but may improve relevance)",
             variable=self.query_transform_var
         ).pack(anchor="w")
+
+        # Adding radio buttons for generator model selection
+        model_selection_frame = tk.LabelFrame(query_controls_frame, text="Select Generator Model", padx=10, pady=5)
+        model_selection_frame.pack(fill="x", pady=(10, 5))
+
+        tk.Radiobutton(
+            model_selection_frame, text="All-Purpose (Mistral)", variable=self.selected_generator_model,
+            value="mistral-gguf"
+        ).pack(side="left", padx=10)
+
+        tk.Radiobutton(
+            model_selection_frame, text="Summarization (Zephyr)", variable=self.selected_generator_model,
+            value="zephyr-gguf"
+        ).pack(side="left", padx=10)
+
+        tk.Radiobutton(
+            model_selection_frame, text="Coding & Logic (CodeLlama)", variable=self.selected_generator_model,
+            value="codellama-gguf"
+        ).pack(side="left", padx=10)
 
         # Relevance Threshold and Temperature User input
         settings_frame = tk.Frame(query_controls_frame)
@@ -252,14 +274,17 @@ class DocumentDatabaseGUI:
         selected_dbs = [name for var, name in self.database_vars if var.get()]
         selected_db_str = "All" if not selected_dbs else ",".join(selected_dbs)
 
+        # Selected generator
+        generator_name = self.selected_generator_model.get()
+
         self.update_result_text("")  # Clear the old answer
         self.update_status_text("Starting query...")  # Set the initial status
 
-        threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature, use_transform),
-                         daemon=True).start()
+        threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
+                                                          use_transform, generator_name), daemon=True).start()
 
     # LLM generation step
-    def process_query(self, query_text, selected_db, relevance, temperature, use_transform):
+    def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name):
         self.update_result_text("Processing query... Please wait.")
         try:
             final_answer, sources = self.rag_pipeline.answer_question(
@@ -268,7 +293,8 @@ class DocumentDatabaseGUI:
                 relevance_threshold=relevance,
                 temperature=temperature,
                 use_query_transform=use_transform,
-                status_callback=self.update_status_text  # Pass the GUI function to the backend
+                status_callback=self.update_status_text,  # Pass the GUI function to the backend
+                generator_name=generator_name
             )
             self.update_result_text(final_answer)
         except Exception as e:
