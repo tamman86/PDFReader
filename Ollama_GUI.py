@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import threading
 import os
+os.environ['HF_HUB_OFFLINE'] = '1' # Keep HuggingFace from online communication
 import shutil
 
 from Ollama_DB import DatabaseBuilder, CONFIG as DB_CONFIG
