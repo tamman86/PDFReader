@@ -6,8 +6,7 @@ from transformers import pipeline, AutoModelForQuestionAnswering
 from langchain_community.llms import LlamaCpp
 from sentence_transformers.cross_encoder import CrossEncoder
 
-### --- REFACTOR --- ###
-# Centralize all configuration into a single, easy-to-manage dictionary.
+# Program config settings
 CONFIG = {
     "chroma_base_path": "chroma",
     "embedding_model": "local_models/bge-large-en-v1.5",
@@ -29,9 +28,8 @@ CONFIG = {
     "top_k_results": 3
 }
 
-
+# Display all embedded databases
 def list_databases():
-    """Lists available databases for the GUI to display."""
     base_path = CONFIG["chroma_base_path"]
     if not os.path.exists(base_path):
         return []
@@ -46,12 +44,8 @@ def list_databases():
     return databases
 
 
+# Class used for loading models and executing queries
 class RAGPipeline:
-    """
-    Encapsulates the entire Retrieval-Augmented Generation pipeline.
-    This class manages loading models and executing the query process.
-    """
-
     def __init__(self, config):
         self.config = config
         self._embedding_function = None
@@ -61,6 +55,7 @@ class RAGPipeline:
 
     @property
     def embedding_function(self):
+        # Specify embedding function
         if self._embedding_function is None:
             print(f"Loading embedding model: {self.config['embedding_model']}...")
             self._embedding_function = HuggingFaceEmbeddings(model_name=self.config["embedding_model"])
@@ -68,12 +63,14 @@ class RAGPipeline:
 
     @property
     def reranker_model(self):
+        # Specify reranker model
         if self._reranker_model is None:
             print(f"Loading re-ranker model: {self.config['reranker_model']}...")
             self._reranker_model = CrossEncoder(self.config["reranker_model"], max_length=512)
         return self._reranker_model
 
     def get_extractor_pipeline(self, model_name):
+        # Specify extractor model
         if model_name not in self._extractor_pipelines:
             print(f"Loading extractor model: {model_name}...")
             model_path = self.config["extractor_models"][model_name]
@@ -82,6 +79,7 @@ class RAGPipeline:
         return self._extractor_pipelines[model_name]
 
     def get_generator_llm(self, model_name, temperature):
+        # Specify generator model
         model_info = self.config["generator_models"][model_name]
         print(f"Loading generator model: {model_name}...")
 
@@ -99,13 +97,12 @@ class RAGPipeline:
         else:
             raise NotImplementedError(f"Generator type '{model_info['type']}' not implemented.")
 
-    def _transform_query(self, query_text: str) -> str:
-        """
-        Uses an LLM to rewrite the user's query into a more detailed version
-        for better retrieval.
-        """
-        print("  -> Transforming query with LLM...")
+    # User option to use LLM to help fine tune their query
+    def _transform_query(self, query_text: str, status_callback=None) -> str:
+        if status_callback: status_callback("Step 1/5: Transforming query...")
 
+        print("  -> Transforming query with LLM...")
+        # Rules for system to follow when enhancing query
         prompt = f"""You are an expert search query creator. Your task is to take a user's question and rephrase it into a more detailed, "ideal" query that is perfectly suited for a semantic search against a technical knowledge base.
 
 RULES:
@@ -128,17 +125,22 @@ Ideal Search Query:
         print(f"  -> Transformed Query: '{transformed_query}'")
         return transformed_query
 
+    # Main engine to find relevant spans based on prompts and generate a Natural Language response
     def answer_question(self, query_text, selected_db="All", relevance_threshold=0.3, temperature=0.7,
-                        generator_name="mistral-gguf", use_query_transform=False):
-        # Step 1: Retrieval
+                        generator_name="mistral-gguf", use_query_transform=False, status_callback=None):
+
+        if status_callback: status_callback("Starting query process...")
+
+        # Step 1: Retrieval - Pull the most relevant chunks which apply to the query
         print("Step 1: Retrieving document chunks...")
         dbs = self._load_databases(selected_db)
         if not dbs: return "Error: Could not load any valid databases.", []
 
-        retrieved_docs = []
+        # If the user decides to "enhance" their query
         if use_query_transform:
             print("  -> Using hybrid query approach.")
-            transformed_query = self._transform_query(query_text)
+            transformed_query = self._transform_query(query_text, status_callback)
+            if status_callback: status_callback("Step 2/5: Retrieving documents (Hybrid)...")
 
             # Retrieve for both original and transformed queries
             original_results = self._retrieve_docs(dbs, query_text)
@@ -149,29 +151,42 @@ Ideal Search Query:
             retrieved_docs = list(all_docs.values())
         else:
             print("  -> Using direct query approach.")
+            if status_callback: status_callback("Step 1/4: Retrieving documents...")
             retrieved_docs = self._retrieve_docs(dbs, query_text)
 
         if not retrieved_docs: return "No documents were retrieved from the database.", []
 
-        # Step 2: Re-ranking
+        step_num = 3 if use_query_transform else 2
+        total_steps = 5 if use_query_transform else 4
+        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Re-ranking retrieved chunks...")
+
+        # Step 2: Re-ranking - Ranking the pulled chunks so the generator has a priority list
         print("Step 2: Re-ranking retrieved chunks...")
         reranked_results = self._rerank_docs(query_text, retrieved_docs)
         if not reranked_results or reranked_results[0][
             1] < relevance_threshold: return "No relevant results found after re-ranking.", []
         top_docs_with_scores = reranked_results[:self.config["top_k_results"]]
 
-        # Step 3: Extraction
+        step_num += 1
+        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Extracting specific answers...")
+
+        # Step 3: Extraction - Pulling the info out of the ranked spans
         print("Step 3: Extracting specific answers...")
         top_extractions = self._extract_answers(query_text, top_docs_with_scores)
         if not top_extractions: return "Could not extract any answer spans.", []
 
-        # Step 4: Generation
+        step_num += 1
+        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Generating final answer...")
+
+        # Step 4: Generation - Feed the info into the response generator with instructions
         print("Step 4: Generating final answer...")
         final_answer = self._generate_answer(query_text, top_extractions, generator_name, temperature)
 
         sources = [doc.metadata.get("source", "Unknown") for doc, score in top_docs_with_scores]
+        if status_callback: status_callback("Done.")
         return final_answer, sources
 
+    # User selects which databases the query is to be applied to. No Selection = All Databases
     def _load_databases(self, selected_db):
         dbs = []
         db_names_to_load = list_databases() if selected_db == "All" else selected_db.split(',')
@@ -200,12 +215,11 @@ Ideal Search Query:
         reranked_results.sort(key=lambda x: x[0], reverse=True)
         return [(doc, score) for score, doc in reranked_results]
 
+    # Extract answer spans from the best documents and elaborate using surrounding context
     def _extract_answers(self, query_text, top_docs_with_scores):
-        """
-        Extracts answer spans from the top documents and expands them with surrounding context.
-        """
         top_extractions = []
-        # --- NEW: Define a character window for context expansion ---
+
+        # Context window for response enhancement
         CONTEXT_WINDOW = 100
 
         for model_name in self.config["extractor_models"].keys():
@@ -218,7 +232,7 @@ Ideal Search Query:
                     if result["score"] < self.config["extractor_confidence_threshold"]:
                         continue
 
-                    # --- NEW: Context Expansion Logic ---
+                    # Context expansion
                     span = result["answer"]
                     full_chunk = doc.page_content
 
@@ -242,12 +256,11 @@ Ideal Search Query:
                         expanded_context = full_chunk[start_sentence:end_sentence + 1].strip()
                     else:
                         expanded_context = span  # Fallback to just the span if it can't be found
-                    # --- END of new logic ---
 
                     final_score = chunk_score * result["score"]
                     top_extractions.append({
-                        "span": span,  # Keep the original span for reference
-                        "context": expanded_context,  # The new, rich context
+                        "span": span,  # Original span
+                        "context": expanded_context,  # Expanded span
                         "final_score": final_score
                     })
                 except Exception as e:
@@ -256,14 +269,11 @@ Ideal Search Query:
         top_extractions.sort(key=lambda x: x["final_score"], reverse=True)
         return top_extractions
 
+    # Generator prompt formation
     def _generate_answer(self, query_text, top_extractions, generator_name, temperature):
-        """Builds the final prompt and generates the answer."""
-
-        # --- MODIFIED LINE: Use the new 'context' field instead of 'span' ---
         context_for_prompt = "\n".join(
             [f"{i + 1}. {ex['context']}" for i, ex in enumerate(top_extractions[:self.config["top_k_results"]])]
         )
-        # --- END of modification ---
 
         generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent answer.
 
@@ -283,7 +293,6 @@ Based ONLY on the information above, provide a comprehensive and coherent answer
 def main():
     parser = argparse.ArgumentParser(description="Query documents using a RAG pipeline.")
     parser.add_argument("query_text", type=str, help="The query text.")
-    # ... (rest of argparse setup for command-line use)
     args = parser.parse_args()
     pipeline = RAGPipeline(CONFIG)
     final_answer, sources = pipeline.answer_question(query_text=args.query_text)

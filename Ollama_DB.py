@@ -6,8 +6,6 @@ from langchain.schema import Document
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# Centralize all settings into a single, easy-to-manage configuration dictionary.
-# The chunk size here acts as a default if not provided.
 CONFIG = {
     "chroma_base_path": "chroma",
     "embedding_model_name": "local_models/bge-large-en-v1.5",
@@ -15,47 +13,36 @@ CONFIG = {
     "chunk_overlap_ratio": 0.2,
 }
 
-
 class DatabaseBuilder:
-    """
-    Encapsulates the logic for creating and managing ChromaDB databases.
-    Loads the embedding model only once for efficiency.
-    """
-
     def __init__(self, config):
         self.config = config
         self._embedding_function = None
 
     @property
     def embedding_function(self):
-        """Lazy loader for the embedding model."""
+        # Load embedding model
         if self._embedding_function is None:
             print(f"Loading embedding model for DB Builder: {self.config['embedding_model_name']}...")
             self._embedding_function = HuggingFaceEmbeddings(model_name=self.config["embedding_model_name"])
             print("✅ DB Builder embedding model loaded.")
         return self._embedding_function
 
-    ### --- MODIFICATION: process_document now accepts chunk_size --- ###
+    # Process Document for chunking (Chunk size determined by user)
     def process_document(self, file_path: str, title: str, revision: str, chunk_size: int):
-        """
-        Main method to load, split, and embed a single document.
-        Now takes a specific chunk_size for this operation.
-        """
         print(f"--- Processing Document: {title} ({revision}) with chunk size {chunk_size} ---")
         documents = self._load_document(file_path)
         if not documents:
             return
 
-        ### --- MODIFICATION: Pass chunk_size to the splitter method --- ###
         chunks = self._split_text(documents, chunk_size)
         if not chunks:
             return
 
-        self._save_to_chroma(chunks, title, revision)
+        self._save_to_chroma(chunks, title, revision, chunk_size)
         print(f"--- Finished Processing: {title} ({revision}) ---\n")
 
+    # Loads a document from supplied file path
     def _load_document(self, file_path: str) -> list[Document]:
-        """Loads a document from a file path."""
         file_extension = os.path.splitext(file_path)[1].lower()
         loader = None
         if file_extension == ".pdf":
@@ -71,11 +58,10 @@ class DatabaseBuilder:
         print(f"Loading file: {file_path}")
         return loader.load()
 
-    ### --- MODIFICATION: _split_text now accepts and uses chunk_size --- ###
+    # Splits documents into chunks using user specified chunk size
     def _split_text(self, documents: list[Document], chunk_size: int) -> list[Document]:
-        """Splits documents into chunks using a specific chunk_size."""
 
-        # Calculate overlap based on the provided chunk_size and configured ratio
+        # Chunk overlap fo preserve context
         chunk_overlap = int(chunk_size * self.config["chunk_overlap_ratio"])
 
         text_splitter = RecursiveCharacterTextSplitter(
@@ -88,8 +74,8 @@ class DatabaseBuilder:
         print(f"Split {len(documents)} source pages into {len(chunks)} chunks.")
         return self._calculate_chunk_ids(chunks)
 
+    # Create a unique ID for each chunk
     def _calculate_chunk_ids(self, chunks: list[Document]) -> list[Document]:
-        """Creates a unique ID for each chunk."""
         last_page_id = None
         current_chunk_index = 0
         for chunk in chunks:
@@ -105,9 +91,10 @@ class DatabaseBuilder:
             last_page_id = current_page_id
         return chunks
 
-    def _save_to_chroma(self, chunks: list[Document], title: str, revision: str):
-        """Saves document chunks to a ChromaDB database."""
-        chroma_path = os.path.join(self.config["chroma_base_path"], title, revision)
+    # Saves the chunked document to ChromaDB
+    def _save_to_chroma(self, chunks: list[Document], title: str, revision: str, chunk_size: int):
+        revision_folder_name = f"{revision} (Chunk {chunk_size})"
+        chroma_path = os.path.join(self.config["chroma_base_path"], title, revision_folder_name)
         if os.path.exists(chroma_path):
             print(f"Clearing existing database at: {chroma_path}")
             shutil.rmtree(chroma_path)
