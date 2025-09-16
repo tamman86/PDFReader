@@ -4,10 +4,38 @@ import threading
 import os
 os.environ['HF_HUB_OFFLINE'] = '1' # Keep HuggingFace from online communication
 import shutil
+import re
 
 from Ollama_DB import DatabaseBuilder, CONFIG as DB_CONFIG
 from Ollama_Readerv2 import RAGPipeline, CONFIG as READER_CONFIG, list_databases
 
+# Tooltips for citations
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip_window = None
+
+    def show(self, event):
+        x, y, _, _ = self.widget.bbox(tk.INSERT)
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+
+        # Create a Toplevel window
+        self.tooltip_window = tk.Toplevel(self.widget)
+        self.tooltip_window.wm_overrideredirect(True) # Removes window borders
+        self.tooltip_window.wm_geometry(f"+{x}+{y}")
+
+        # Style the label inside the popup
+        label = tk.Label(self.tooltip_window, text=self.text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                         wraplength=500) # Wraps long source text
+        label.pack(ipadx=1)
+
+    def hide(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+        self.tooltip_window = None
 
 class DocumentDatabaseGUI:
     def __init__(self, root):
@@ -277,7 +305,7 @@ class DocumentDatabaseGUI:
         # Selected generator
         generator_name = self.selected_generator_model.get()
 
-        self.update_result_text("")  # Clear the old answer
+        self.update_result_text("", [])  # Clear the old answer
         self.update_status_text("Starting query...")  # Set the initial status
 
         threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
@@ -285,9 +313,9 @@ class DocumentDatabaseGUI:
 
     # LLM generation step
     def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name):
-        self.update_result_text("Processing query... Please wait.")
+        self.update_result_text("Processing query... Please wait.", [])
         try:
-            final_answer, sources = self.rag_pipeline.answer_question(
+            final_answer, top_extractions = self.rag_pipeline.answer_question(
                 query_text=query_text,
                 selected_db=selected_db,
                 relevance_threshold=relevance,
@@ -296,20 +324,59 @@ class DocumentDatabaseGUI:
                 status_callback=self.update_status_text,  # Pass the GUI function to the backend
                 generator_name=generator_name
             )
-            self.update_result_text(final_answer)
+            self.update_result_text(final_answer, top_extractions)
         except Exception as e:
-            self.update_result_text(f"An error occurred during query processing:\n{e}")
+            self.update_result_text(f"An error occurred during query processing:\n{e}", [])
         finally:
             # This ensures the status is always reset when the process is over.
             self.update_status_text("Ready.")
 
     # Update GUI text box via background thread
-    def update_result_text(self, text):
+    def update_result_text(self, text, sources):
         def task():
+            # 1. Clear previous content and any old tags
+            self.result_text.config(state=tk.NORMAL)  # Make widget editable
             self.result_text.delete("1.0", tk.END)
-            self.result_text.insert(tk.END, text)
+            for tag in self.result_text.tag_names():
+                if "citation-" in tag:
+                    self.result_text.tag_delete(tag)
 
-        # Schedule the GUI update to run on the main thread.
+            # 2. Insert the new answer text
+            self.result_text.insert("1.0", text)
+
+            # 3. Configure the visual style for our citation "links"
+            self.result_text.tag_configure("citation_style", foreground="blue", underline=True)
+
+            # 4. Find all citation markers like [1], [2], etc.
+            for match in re.finditer(r'\[(\d+)\]', text):
+                start, end = match.span()
+                citation_num_str = match.group(1)
+                citation_index = int(citation_num_str) - 1
+
+                # 5. Check if this citation number is valid for the sources we received
+                if 0 <= citation_index < len(sources):
+                    # The full text of the source chunk
+                    source_text = sources[citation_index]['context']
+                    tag_name = f"citation-{start}"  # A unique tag for this specific link
+
+                    # Get the start and end position in Tkinter's text index format
+                    start_index = f"1.0+{start}c"
+                    end_index = f"1.0+{end}c"
+
+                    # 6. Apply the blue, underlined style
+                    self.result_text.tag_add("citation_style", start_index, end_index)
+
+                    # 7. Apply the unique tag for event binding
+                    self.result_text.tag_add(tag_name, start_index, end_index)
+
+                    # 8. Create the tooltip and bind mouse events
+                    tooltip = ToolTip(self.result_text, text=source_text)
+                    self.result_text.tag_bind(tag_name, "<Enter>", lambda e, t=tooltip: t.show(e))
+                    self.result_text.tag_bind(tag_name, "<Leave>", lambda e, t=tooltip: t.hide(e))
+
+            self.result_text.config(state=tk.DISABLED)  # Make widget read-only again
+
+        # Schedule the GUI update to run on the main thread
         self.root.after(0, task)
 
     # Update GUI status bar via background thread

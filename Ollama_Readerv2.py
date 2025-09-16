@@ -189,9 +189,8 @@ Ideal Search Query:
         print("Step 4: Generating final answer...")
         final_answer = self._generate_answer(query_text, top_extractions, generator_name, temperature)
 
-        sources = [doc.metadata.get("source", "Unknown") for doc, score in top_docs_with_scores]
         if status_callback: status_callback("Done.")
-        return final_answer, sources
+        return final_answer, top_extractions[:self.config["top_k_results"]]
 
     # User selects which databases the query is to be applied to. No Selection = All Databases
     def _load_databases(self, selected_db):
@@ -286,37 +285,67 @@ Ideal Search Query:
         if generator_name == "mistral-gguf":
             generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent, and precise answer.
 
+**CRITICAL RULES:**
+1. You MUST cite the information you use.
+2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+3. Every piece of information in your answer must be followed by its citation.
+4. If multiple pieces of information come from the same source, cite it each time.
+5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+**EXAMPLE:**
+An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
 USER'S QUESTION:
 "{query_text}"
 
 RELEVANT EXTRACTED INFORMATION:
 {context_for_prompt}
 
-Based ONLY on the information provided, provide a comprehensive and well-structured answer to the user's question.
+Based ONLY on the information and rules above, provide a comprehensive and heavily cited answer:
 """
 
         elif generator_name == "zephyr-gguf":
             generator_prompt = f"""You are an expert explainer. Your task is to summarize the key findings from the following extracted information and explain the main concept in clear, easy-to-understand language.
 
+**CRITICAL RULES:**
+1. You MUST cite the information you use.
+2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+3. Every piece of information in your answer must be followed by its citation.
+4. If multiple pieces of information come from the same source, cite it each time.
+5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+**EXAMPLE:**
+An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
 USER'S QUESTION:
 "{query_text}"
 
 RELEVANT EXTRACTED INFORMATION:
 {context_for_prompt}
 
-Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question.
+Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question with citations.
 """
 
         elif generator_name == "codellama-gguf":
             generator_prompt = f"""You are a senior software engineer and code analyst. Your task is to analyze the following extracted information to answer the user's question, which may be about code, logic, or technical procedures.
 
+**CRITICAL RULES:**
+1. You MUST cite the information you use.
+2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+3. Every piece of information in your answer must be followed by its citation.
+4. If multiple pieces of information come from the same source, cite it each time.
+5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+**EXAMPLE:**
+An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
 USER'S QUESTION:
 "{query_text}"
 
 RELEVANT EXTRACTED INFORMATION:
 {context_for_prompt}
 
-Based ONLY on the information provided, explain the code or logic in detail. If appropriate, provide a clear, commented code example.
+Based ONLY on the information provided, explain the code or logic in detail with citations. If appropriate, provide a clear, commented code example.
 """
         else:
             generator_prompt = context_for_prompt  # Fallback to just context
