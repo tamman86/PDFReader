@@ -8,6 +8,10 @@ import re
 
 from Ollama_DB import DatabaseBuilder, CONFIG as DB_CONFIG
 from Ollama_Readerv2 import RAGPipeline, CONFIG as READER_CONFIG, list_databases
+from Download_Model import ModelDownloader, MODELS_TO_DOWNLOAD, LOCAL_MODEL_DIR
+from dotenv import load_dotenv
+load_dotenv()
+HuggingFaceToken = os.getenv("HUGGINGFACE_TOKEN")
 
 # Tooltips for citations
 class ToolTip:
@@ -47,13 +51,26 @@ class DocumentDatabaseGUI:
         print("Initializing backend pipelines... (This may take a moment)")
         self.db_builder = DatabaseBuilder(DB_CONFIG)
         self.rag_pipeline = RAGPipeline(READER_CONFIG)
+        self.model_downloader = ModelDownloader(MODELS_TO_DOWNLOAD, LOCAL_MODEL_DIR, HuggingFaceToken)
         print("✅ Pipelines initialized.")
 
         # Variable for selected generator (Mistral default)
         self.selected_generator_model = tk.StringVar(value="mistral-gguf")
 
         # UI Setup
-        # 1. Database Creation Frame
+
+        # Model Download Button
+        setup_frame = tk.LabelFrame(root, text="Initial Setup", padx=10, pady=10)
+        setup_frame.pack(padx=10, pady=10, fill="x")
+
+        tk.Button(
+            setup_frame,
+            text="Download All Required Models",
+            command=self.download_all_models,
+            bg="#D6EAF8" # Light Blue
+        ).pack(pady=5)
+
+        # Database Creation Frame
         self.create_db_frame = tk.LabelFrame(root, text="1. Create or Re-build a Database", padx=10, pady=10)
         self.create_db_frame.pack(padx=10, pady=10, fill="x")
 
@@ -181,6 +198,22 @@ class DocumentDatabaseGUI:
 
         self.database_vars = []
         self.load_databases_to_gui()
+
+    # Model Downloader
+    def download_all_models(self):
+        # Ask the user for confirmation before starting the large download.
+        if messagebox.askyesno("Confirm Download",
+                               "This will check for and download all required AI models (several GB). This may take a long time. Continue?"):
+            threading.Thread(target=self.process_downloads, daemon=True).start()
+
+    def process_downloads(self):
+        try:
+            self.model_downloader.run_downloads(status_callback=self.update_status_text)
+            messagebox.showinfo("Success", "Model download process finished successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred during download: {e}")
+        finally:
+            self.update_status_text("Ready.")
 
     # File browser for selecting files to chunk/embed
     def browse_file(self):
