@@ -5,6 +5,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from transformers import pipeline, AutoModelForQuestionAnswering
 from langchain_community.llms import LlamaCpp
 from sentence_transformers.cross_encoder import CrossEncoder
+import torch
+import time
 
 # Program config settings
 CONFIG = {
@@ -16,20 +18,28 @@ CONFIG = {
         "roberta-squad2": "local_models/roberta-base-squad2",
     },
     "generator_models": {
-        "mistral-gguf": {
+        "mistral-q4": {
             "path": "local_models/mistral-7b-instruct-v0.2-gguf",
+            "filename": "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
             "type": "gguf"
         },
-        "zephyr-gguf": {
+        "mistral-q3": {
+            "path": "local_models/mistral-7b-instruct-v0.2-gguf",
+            "filename": "mistral-7b-instruct-v0.2.Q3_K_M.gguf",
+            "type": "gguf"
+        },
+        "zephyr-q4": {
             "path": "local_models/zephyr-7b-beta-gguf",
+            "filename": "zephyr-7b-beta.Q4_K_M.gguf",
             "type": "gguf"
         },
-        "codellama-gguf": {
+        "codellama-q4": {
             "path": "local_models/codellama-7b-instruct-gguf",
+            "filename": "codellama-7b-instruct.Q4_K_M.gguf",
             "type": "gguf"
         }
     },
-    "query_transformer_model": "mistral-gguf",
+    "query_transformer_model": "mistral-q4",
     "extractor_confidence_threshold": 0.05,
     "retrieval_k": 20,
     "top_k_results": 3
@@ -85,24 +95,44 @@ class RAGPipeline:
                                                              tokenizer=model_path, local_files_only=True)
         return self._extractor_pipelines[model_name]
 
-    def get_generator_llm(self, model_name, temperature):
-        # Specify generator model
-        model_info = self.config["generator_models"][model_name]
-        print(f"Loading generator model: {model_name}...")
+    def _clear_cached_generators(self):
+        if not self._generator_llms:
+            return
 
-        if model_info["type"] == "gguf":
-            gguf_path = model_info["path"]
-            gguf_file = [f for f in os.listdir(gguf_path) if f.endswith(".gguf")]
-            if not gguf_file:
-                raise RuntimeError(f"No .gguf file found in {gguf_path}")
-            gguf_file_path = os.path.join(gguf_path, gguf_file[0])
+        print("Clearing cached generator model from VRAM...")
+        keys = list(self._generator_llms.keys())
+        for key in keys:
+            del self._generator_llms[key]
 
-            return LlamaCpp(
-                model_path=gguf_file_path, n_gpu_layers=-1, n_batch=512,
-                n_ctx=4096, temperature=temperature, max_tokens=256, verbose=False
-            )
-        else:
-            raise NotImplementedError(f"Generator type '{model_info['type']}' not implemented.")
+        torch.cuda.empty_cache()
+        print("VRAM cleared.")
+        time.sleep(60)
+
+    def get_generator_llm(self, model_name):
+        if model_name not in self._generator_llms:
+            # Eject any other model that might be loaded.
+            self._clear_cached_generators()
+
+            model_info = self.config["generator_models"][model_name]
+            print(f"Loading generator model for the first time: {model_name}...")
+
+            if model_info["type"] == "gguf":
+                gguf_path = model_info["path"]
+                gguf_filename = model_info["filename"]
+                gguf_file_path = os.path.join(gguf_path, gguf_filename)
+                if not os.path.exists(gguf_file_path):
+                    raise RuntimeError(f"Model file not found: {gguf_file_path}")
+
+                llm = LlamaCpp(
+                    model_path=gguf_file_path, n_gpu_layers=-1, n_batch=512,
+                    n_ctx=4096, max_tokens=512, verbose=False
+                )
+                self._generator_llms[model_name] = llm
+            else:
+                raise NotImplementedError(f"Generator type '{model_info['type']}' not implemented.")
+
+        # Return the model from the cache
+        return self._generator_llms[model_name]
 
     # User option to use LLM to help fine tune their query
     def _transform_query(self, query_text: str, status_callback=None) -> str:
@@ -125,7 +155,8 @@ User's Query:
 Ideal Search Query:
 """
         # Use the configured transformer model with a very low temperature for deterministic results
-        transformer_llm = self.get_generator_llm(self.config["query_transformer_model"], temperature=0.01)
+        transformer_llm = self.get_generator_llm(self.config["query_transformer_model"])
+        transformer_llm.temperature = 0.01
         transformed_query = transformer_llm.invoke(prompt).strip()
 
         print(f"  -> Original Query:    '{query_text}'")
@@ -134,7 +165,7 @@ Ideal Search Query:
 
     # Main engine to find relevant spans based on prompts and generate a Natural Language response
     def answer_question(self, query_text, selected_db="All", relevance_threshold=0.3, temperature=0.7,
-                        generator_name="mistral-gguf", use_query_transform=False, status_callback=None):
+                        generator_name="mistral-q4", use_query_transform=False, status_callback=None):
 
         if status_callback: status_callback("Starting query process...")
 
@@ -282,7 +313,7 @@ Ideal Search Query:
         )
 
         generator_prompt = ""
-        if generator_name == "mistral-gguf":
+        if generator_name == "mistral-q4" or generator_name == "mistral-q3":
             generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent, and precise answer.
 
 **CRITICAL RULES:**
@@ -304,7 +335,7 @@ RELEVANT EXTRACTED INFORMATION:
 Based ONLY on the information and rules above, provide a comprehensive and heavily cited answer:
 """
 
-        elif generator_name == "zephyr-gguf":
+        elif generator_name == "zephyr-q4":
             generator_prompt = f"""You are an expert explainer. Your task is to summarize the key findings from the following extracted information and explain the main concept in clear, easy-to-understand language.
 
 **CRITICAL RULES:**
@@ -326,7 +357,7 @@ RELEVANT EXTRACTED INFORMATION:
 Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question with citations.
 """
 
-        elif generator_name == "codellama-gguf":
+        elif generator_name == "codellama-q4":
             generator_prompt = f"""You are a senior software engineer and code analyst. Your task is to analyze the following extracted information to answer the user's question, which may be about code, logic, or technical procedures.
 
 **CRITICAL RULES:**
@@ -351,7 +382,8 @@ Based ONLY on the information provided, explain the code or logic in detail with
             generator_prompt = context_for_prompt  # Fallback to just context
 
         print("\n🧠 Prompt to Generator:\n", generator_prompt)
-        llm = self.get_generator_llm(generator_name, temperature)
+        llm = self.get_generator_llm(generator_name)
+        llm.temperature = temperature
         return llm.invoke(generator_prompt)
 
 

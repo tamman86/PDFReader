@@ -55,7 +55,7 @@ class DocumentDatabaseGUI:
         print("✅ Pipelines initialized.")
 
         # Variable for selected generator (Mistral default)
-        self.selected_generator_model = tk.StringVar(value="mistral-gguf")
+        self.selected_generator_model = tk.StringVar(value="mistral-q4")
 
         # UI Setup
 
@@ -161,18 +161,23 @@ class DocumentDatabaseGUI:
         model_selection_frame.pack(fill="x", pady=(10, 5))
 
         tk.Radiobutton(
-            model_selection_frame, text="All-Purpose (Mistral)", variable=self.selected_generator_model,
-            value="mistral-gguf"
+            model_selection_frame, text="Balanced (Mistral)", variable=self.selected_generator_model,
+            value="mistral-q4"
+        ).pack(side="left", padx=10)
+
+        tk.Radiobutton(
+            model_selection_frame, text="Fast (Mistral)", variable=self.selected_generator_model,
+            value="mistral-q3"
         ).pack(side="left", padx=10)
 
         tk.Radiobutton(
             model_selection_frame, text="Summarization (Zephyr)", variable=self.selected_generator_model,
-            value="zephyr-gguf"
+            value="zephyr-q4"
         ).pack(side="left", padx=10)
 
         tk.Radiobutton(
             model_selection_frame, text="Coding & Logic (CodeLlama)", variable=self.selected_generator_model,
-            value="codellama-gguf"
+            value="codellama-q4"
         ).pack(side="left", padx=10)
 
         # Relevance Threshold and Temperature User input

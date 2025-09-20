@@ -16,6 +16,8 @@ MODELS_TO_DOWNLOAD = [
     # --- Single GGUF File Downloads ---
     {"type": "single_file", "repo_id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
      "filename": "mistral-7b-instruct-v0.2.Q3_K_M.gguf", "local_name": "mistral-7b-instruct-v0.2-gguf"},
+    {"type": "single_file", "repo_id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+     "filename": "mistral-7b-instruct-v0.2.Q4_K_M.gguf", "local_name": "mistral-7b-instruct-v0.2-gguf"},
     {"type": "single_file", "repo_id": "TheBloke/Zephyr-7B-beta-GGUF", "filename": "zephyr-7b-beta.Q4_K_M.gguf",
      "local_name": "zephyr-7b-beta-gguf"},
     {"type": "single_file", "repo_id": "TheBloke/CodeLlama-7B-Instruct-GGUF",
