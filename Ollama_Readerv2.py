@@ -95,6 +95,18 @@ class RAGPipeline:
                                                              tokenizer=model_path, local_files_only=True)
         return self._extractor_pipelines[model_name]
 
+    # Clear cached Extractor and Re-Ranker from GPU
+    def _clear_cached_specialists(self):
+        if self._reranker_model is None and not self._extractor_pipelines:
+            return
+
+        print("Clearing specialist models (re-ranker, extractor) from VRAM...")
+        self._reranker_model = None
+        self._extractor_pipelines.clear()
+
+        torch.cuda.empty_cache()
+        print("VRAM cleared.")
+
     def _clear_cached_generators(self):
         if not self._generator_llms:
             return
@@ -106,9 +118,11 @@ class RAGPipeline:
 
         torch.cuda.empty_cache()
         print("VRAM cleared.")
-        time.sleep(60)
 
     def get_generator_llm(self, model_name):
+        # Eject the specialists BEFORE loading the generator.
+        self._clear_cached_specialists()
+
         if model_name not in self._generator_llms:
             # Eject any other model that might be loaded.
             self._clear_cached_generators()
@@ -169,59 +183,64 @@ Ideal Search Query:
 
         if status_callback: status_callback("Starting query process...")
 
-        # Step 1: Retrieval - Pull the most relevant chunks which apply to the query
-        print("Step 1: Retrieving document chunks...")
-        dbs = self._load_databases(selected_db)
-        if not dbs: return "Error: Could not load any valid databases.", []
+        try:
+            # Step 1: Retrieval - Pull the most relevant chunks which apply to the query
+            print("Step 1: Retrieving document chunks...")
+            dbs = self._load_databases(selected_db)
+            if not dbs: return "Error: Could not load any valid databases.", []
 
-        # If the user decides to "enhance" their query
-        if use_query_transform:
-            print("  -> Using hybrid query approach.")
-            transformed_query = self._transform_query(query_text, status_callback)
-            if status_callback: status_callback("Step 2/5: Retrieving documents (Hybrid)...")
+            # If the user decides to "enhance" their query
+            if use_query_transform:
+                print("  -> Using hybrid query approach.")
+                transformed_query = self._transform_query(query_text, status_callback)
+                if status_callback: status_callback("Step 2/5: Retrieving documents (Hybrid)...")
 
-            # Retrieve for both original and transformed queries
-            original_results = self._retrieve_docs(dbs, query_text)
-            transformed_results = self._retrieve_docs(dbs, transformed_query)
+                # Retrieve for both original and transformed queries
+                original_results = self._retrieve_docs(dbs, query_text)
+                transformed_results = self._retrieve_docs(dbs, transformed_query)
 
-            # Combine and de-duplicate the results
-            all_docs = {doc.page_content: doc for doc in original_results + transformed_results}
-            retrieved_docs = list(all_docs.values())
-        else:
-            print("  -> Using direct query approach.")
-            if status_callback: status_callback("Step 1/4: Retrieving documents...")
-            retrieved_docs = self._retrieve_docs(dbs, query_text)
+                # Combine and de-duplicate the results
+                all_docs = {doc.page_content: doc for doc in original_results + transformed_results}
+                retrieved_docs = list(all_docs.values())
+            else:
+                print("  -> Using direct query approach.")
+                if status_callback: status_callback("Step 1/4: Retrieving documents...")
+                retrieved_docs = self._retrieve_docs(dbs, query_text)
 
-        if not retrieved_docs: return "No documents were retrieved from the database.", []
+            if not retrieved_docs: return "No documents were retrieved from the database.", []
 
-        step_num = 3 if use_query_transform else 2
-        total_steps = 5 if use_query_transform else 4
-        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Re-ranking retrieved chunks...")
+            step_num = 3 if use_query_transform else 2
+            total_steps = 5 if use_query_transform else 4
+            if status_callback: status_callback(f"Step {step_num}/{total_steps}: Re-ranking retrieved chunks...")
 
-        # Step 2: Re-ranking - Ranking the pulled chunks so the generator has a priority list
-        print("Step 2: Re-ranking retrieved chunks...")
-        reranked_results = self._rerank_docs(query_text, retrieved_docs)
-        if not reranked_results or reranked_results[0][
-            1] < relevance_threshold: return "No relevant results found after re-ranking.", []
-        top_docs_with_scores = reranked_results[:self.config["top_k_results"]]
+            # Step 2: Re-ranking - Ranking the pulled chunks so the generator has a priority list
+            print("Step 2: Re-ranking retrieved chunks...")
+            reranked_results = self._rerank_docs(query_text, retrieved_docs)
+            if not reranked_results or reranked_results[0][
+                1] < relevance_threshold: return "No relevant results found after re-ranking.", []
+            top_docs_with_scores = reranked_results[:self.config["top_k_results"]]
 
-        step_num += 1
-        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Extracting specific answers...")
+            step_num += 1
+            if status_callback: status_callback(f"Step {step_num}/{total_steps}: Extracting specific answers...")
 
-        # Step 3: Extraction - Pulling the info out of the ranked spans
-        print("Step 3: Extracting specific answers...")
-        top_extractions = self._extract_answers(query_text, top_docs_with_scores)
-        if not top_extractions: return "Could not extract any answer spans.", []
+            # Step 3: Extraction - Pulling the info out of the ranked spans
+            print("Step 3: Extracting specific answers...")
+            top_extractions = self._extract_answers(query_text, top_docs_with_scores)
+            if not top_extractions: return "Could not extract any answer spans.", []
 
-        step_num += 1
-        if status_callback: status_callback(f"Step {step_num}/{total_steps}: Generating final answer...")
+            step_num += 1
+            if status_callback: status_callback(f"Step {step_num}/{total_steps}: Generating final answer...")
 
-        # Step 4: Generation - Feed the info into the response generator with instructions
-        print("Step 4: Generating final answer...")
-        final_answer = self._generate_answer(query_text, top_extractions, generator_name, temperature)
+            # Step 4: Generation - Feed the info into the response generator with instructions
+            print("Step 4: Generating final answer...")
+            final_answer = self._generate_answer(query_text, top_extractions, generator_name, temperature)
 
-        if status_callback: status_callback("Done.")
-        return final_answer, top_extractions[:self.config["top_k_results"]]
+            if status_callback: status_callback("Done.")
+            return final_answer, top_extractions[:self.config["top_k_results"]]
+
+        # Clear generators when done
+        finally:
+            self._clear_cached_generators()
 
     # User selects which databases the query is to be applied to. No Selection = All Databases
     def _load_databases(self, selected_db):
