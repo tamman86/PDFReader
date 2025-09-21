@@ -54,6 +54,8 @@ class DocumentDatabaseGUI:
         self.model_downloader = ModelDownloader(MODELS_TO_DOWNLOAD, LOCAL_MODEL_DIR, HuggingFaceToken)
         print("✅ Pipelines initialized.")
 
+        self.current_sources = []
+
         # Variable for selected generator (Mistral default)
         self.selected_generator_model = tk.StringVar(value="mistral-q4")
 
@@ -344,7 +346,7 @@ class DocumentDatabaseGUI:
         generator_name = self.selected_generator_model.get()
 
         start_time = time.monotonic()  # Start the timer
-        self.update_result_text("", [])  # Clear the old answer
+        self.clear_result_text()  # Clear the old answer
         self.update_status_text("Starting query...")  # Set the initial status
 
         threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
@@ -352,79 +354,117 @@ class DocumentDatabaseGUI:
 
     # LLM generation step
     def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name, start_time):
-        self.update_result_text("Processing query... Please wait.", [])
         try:
-            final_answer, top_extractions = self.rag_pipeline.answer_question(
+            # The answer_question method returns a generator
+            stream_generator = self.rag_pipeline.answer_question(
                 query_text=query_text,
                 selected_db=selected_db,
                 relevance_threshold=relevance,
                 temperature=temperature,
                 use_query_transform=use_transform,
-                status_callback=self.update_status_text,  # Pass the GUI function to the backend
+                status_callback=self.update_status_text,
                 generator_name=generator_name
             )
 
-            end_time = time.monotonic()  # Stop the timer
+            # Loop through the generator to get data as it's produced
+            for item in stream_generator:
+                item_type = item.get("type")
+                item_data = item.get("data")
+
+                if item_type == "sources":
+                    # Received the sources, store them in our instance variable
+                    self.current_sources = item_data
+
+                elif item_type == "token":
+                    # Received a text token, append it to the GUI
+                    self.append_to_result_text(item_data)
+
+                elif item_type == "error":
+                    # An error occurred, display it and stop
+                    self.update_result_text(f"An error occurred: {item_data}")
+                    return  # End the process here
+
+            # The stream is finished, calculate the time
+            end_time = time.monotonic()
             elapsed_seconds = int(end_time - start_time)
 
-            self.update_result_text(final_answer, top_extractions, elapsed_seconds)
+            # Now, apply the citation tooltips to the full text
+            self.apply_citations(elapsed_seconds)
+
         except Exception as e:
-            self.update_result_text(f"An error occurred during query processing:\n{e}", [])
+            # Handle unexpected errors during the process
+            self.update_result_text(f"A critical error occurred:\n{e}")
         finally:
-            # This ensures the status is always reset when the process is over.
             self.update_status_text("Ready.")
 
     # Update GUI text box via background thread
-    def update_result_text(self, text, sources, elapsed_seconds=None):
+    # Clear the text box
+    def clear_result_text(self):
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete("1.0", tk.END)
+        self.result_text.config(state=tk.DISABLED)
+        self.current_sources = []  # Reset sources for the new query
+
+    # Append streaming tokens to the text area
+    def append_to_result_text(self, token):
         def task():
-            # 1. Clear previous content and any old tags
-            self.result_text.config(state=tk.NORMAL)  # Make widget editable
-            self.result_text.delete("1.0", tk.END)
-            for tag in self.result_text.tag_names():
-                if "citation-" in tag:
-                    self.result_text.tag_delete(tag)
+            self.result_text.config(state=tk.NORMAL)
+            self.result_text.insert(tk.END, token)
+            self.result_text.config(state=tk.DISABLED)
+            self.result_text.see(tk.END)  # Auto-scroll to the end
 
-            # 2. Insert the new answer text with query time
-            prefix = f"({elapsed_seconds}s) " if elapsed_seconds is not None else ""
-            full_text = f"{prefix}{text}"
-            self.result_text.insert("1.0", full_text)
+        self.root.after(0, task)
 
-            # 3. Configure the visual style for our citation "links"
+    def update_result_text(self, text):
+        def task():
+            self.clear_result_text()
+            self.result_text.config(state=tk.NORMAL)
+            self.result_text.insert("1.0", text)
+            self.result_text.config(state=tk.DISABLED)
+
+        self.root.after(0, task)
+
+    # Insert citations after generation completes
+    def apply_citations(self, elapsed_seconds):
+        def task():
+            self.result_text.config(state=tk.NORMAL)
+
+            # Get the full text from the widget
+            full_text = self.result_text.get("1.0", tk.END)
+
+            # Prepend the elapsed time
+            prefix = f"({elapsed_seconds}s) "
+            self.result_text.insert("1.0", prefix)
+            full_text = prefix + full_text
+
+            # Configure the visual style for our citation "links"
             self.result_text.tag_configure("citation_style", foreground="blue", underline=True)
 
-            # 4. Find all citation markers like [1], [2], etc.
+            # Find all citation markers like [1], [2], etc.
             for match in re.finditer(r'\[(\d+)\]', full_text):
                 start, end = match.span()
                 citation_num_str = match.group(1)
                 citation_index = int(citation_num_str) - 1
 
-                # 5. Check if this citation number is valid for the sources we received
-                if 0 <= citation_index < len(sources):
-                    # The full text of the source chunk
-                    source_text = sources[citation_index]['context']
+                if 0 <= citation_index < len(self.current_sources):
+                    source_text = self.current_sources[citation_index]['context']
                     tag_name = f"citation-{start}"  # A unique tag for this specific link
 
-                    # Get the start and end position in Tkinter's text index format
                     start_index = f"1.0+{start}c"
                     end_index = f"1.0+{end}c"
 
-                    # 6. Apply the blue, underlined style
                     self.result_text.tag_add("citation_style", start_index, end_index)
-
-                    # 7. Apply the unique tag for event binding
                     self.result_text.tag_add(tag_name, start_index, end_index)
 
-                    # 8. Create the tooltip and bind mouse events
                     tooltip = ToolTip(self.result_text, text=source_text)
                     self.result_text.tag_bind(tag_name, "<Enter>", lambda e, t=tooltip: t.show(e))
                     self.result_text.tag_bind(tag_name, "<Leave>", lambda e, t=tooltip: t.hide(e))
 
-            self.result_text.config(state=tk.DISABLED)  # Make widget read-only again
+            self.result_text.config(state=tk.DISABLED)
 
-        # Schedule the GUI update to run on the main thread
         self.root.after(0, task)
 
-    # Update GUI status bar via background thread
+    # Update GUI status bar
     def update_status_text(self, text):
         def task():
             self.status_var.set(text)

@@ -226,20 +226,29 @@ Ideal Search Query:
             # Step 3: Extraction - Pulling the info out of the ranked spans
             print("Step 3: Extracting specific answers...")
             top_extractions = self._extract_answers(query_text, top_docs_with_scores)
-            if not top_extractions: return "Could not extract any answer spans.", []
+
+            if not top_extractions:
+                yield {"type": "error", "data": "Could not extract any answer spans."}
+                return
+
+            # Yield the sources first, so the GUI has them before the answer starts streaming.
+            final_sources = top_extractions[:self.config["top_k_results"]]
+            yield {"type": "sources", "data": final_sources}
 
             step_num += 1
             if status_callback: status_callback(f"Step {step_num}/{total_steps}: Generating final answer...")
 
-            # Step 4: Generation - Feed the info into the response generator with instructions
+            # Step 4: Generation - Stream the answer
             print("Step 4: Generating final answer...")
-            final_answer = self._generate_answer(query_text, top_extractions, generator_name, temperature)
+            # Use 'yield from' to pass all items from the _generate_answer generator
+            yield from self._generate_answer(query_text, top_extractions, generator_name, temperature)
 
             if status_callback: status_callback("Done.")
-            return final_answer, top_extractions[:self.config["top_k_results"]]
 
-        # Clear generators when done
+        except Exception as e:
+            yield {"type": "error", "data": f"An error occurred: {e}"}
         finally:
+            # Clear generators when done
             self._clear_cached_generators()
 
     # User selects which databases the query is to be applied to. No Selection = All Databases
@@ -403,8 +412,10 @@ Based ONLY on the information provided, explain the code or logic in detail with
         print("\n🧠 Prompt to Generator:\n", generator_prompt)
         llm = self.get_generator_llm(generator_name)
         llm.temperature = temperature
-        return llm.invoke(generator_prompt)
 
+        # Now a stream is used in place of a soild block of text response
+        for token in llm.stream(generator_prompt):
+            yield {"type": "token", "data": token}
 
 def main():
     parser = argparse.ArgumentParser(description="Query documents using a RAG pipeline.")
