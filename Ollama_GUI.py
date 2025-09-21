@@ -5,6 +5,7 @@ import os
 os.environ['HF_HUB_OFFLINE'] = '1' # Keep HuggingFace from online communication
 import shutil
 import re
+import time
 
 from Ollama_DB import DatabaseBuilder, CONFIG as DB_CONFIG
 from Ollama_Readerv2 import RAGPipeline, CONFIG as READER_CONFIG, list_databases
@@ -21,9 +22,8 @@ class ToolTip:
         self.tooltip_window = None
 
     def show(self, event):
-        x, y, _, _ = self.widget.bbox(tk.INSERT)
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 25
+        x = event.x_root + 20
+        y = event.y_root + 10
 
         # Create a Toplevel window
         self.tooltip_window = tk.Toplevel(self.widget)
@@ -125,9 +125,9 @@ class DocumentDatabaseGUI:
         # Create scrollable database selection area
         db_list_container = tk.Frame(self.query_frame)
         db_list_container.pack(fill="x", pady=5)
-        db_list_container.config(height=150)
+        db_list_container.config(height=100)
 
-        canvas = tk.Canvas(db_list_container, height=150)
+        canvas = tk.Canvas(db_list_container, height=100)
         scrollbar = tk.Scrollbar(db_list_container, orient="vertical", command=canvas.yview)
         self.scrollable_db_frame = tk.Frame(canvas)
 
@@ -343,14 +343,15 @@ class DocumentDatabaseGUI:
         # Selected generator
         generator_name = self.selected_generator_model.get()
 
+        start_time = time.monotonic()  # Start the timer
         self.update_result_text("", [])  # Clear the old answer
         self.update_status_text("Starting query...")  # Set the initial status
 
         threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
-                                                          use_transform, generator_name), daemon=True).start()
+                                                          use_transform, generator_name, start_time), daemon=True).start()
 
     # LLM generation step
-    def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name):
+    def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name, start_time):
         self.update_result_text("Processing query... Please wait.", [])
         try:
             final_answer, top_extractions = self.rag_pipeline.answer_question(
@@ -362,7 +363,11 @@ class DocumentDatabaseGUI:
                 status_callback=self.update_status_text,  # Pass the GUI function to the backend
                 generator_name=generator_name
             )
-            self.update_result_text(final_answer, top_extractions)
+
+            end_time = time.monotonic()  # Stop the timer
+            elapsed_seconds = int(end_time - start_time)
+
+            self.update_result_text(final_answer, top_extractions, elapsed_seconds)
         except Exception as e:
             self.update_result_text(f"An error occurred during query processing:\n{e}", [])
         finally:
@@ -370,7 +375,7 @@ class DocumentDatabaseGUI:
             self.update_status_text("Ready.")
 
     # Update GUI text box via background thread
-    def update_result_text(self, text, sources):
+    def update_result_text(self, text, sources, elapsed_seconds=None):
         def task():
             # 1. Clear previous content and any old tags
             self.result_text.config(state=tk.NORMAL)  # Make widget editable
@@ -379,14 +384,16 @@ class DocumentDatabaseGUI:
                 if "citation-" in tag:
                     self.result_text.tag_delete(tag)
 
-            # 2. Insert the new answer text
-            self.result_text.insert("1.0", text)
+            # 2. Insert the new answer text with query time
+            prefix = f"({elapsed_seconds}s) " if elapsed_seconds is not None else ""
+            full_text = f"{prefix}{text}"
+            self.result_text.insert("1.0", full_text)
 
             # 3. Configure the visual style for our citation "links"
             self.result_text.tag_configure("citation_style", foreground="blue", underline=True)
 
             # 4. Find all citation markers like [1], [2], etc.
-            for match in re.finditer(r'\[(\d+)\]', text):
+            for match in re.finditer(r'\[(\d+)\]', full_text):
                 start, end = match.span()
                 citation_num_str = match.group(1)
                 citation_index = int(citation_num_str) - 1
