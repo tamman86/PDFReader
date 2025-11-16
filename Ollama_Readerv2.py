@@ -7,6 +7,9 @@ from langchain_community.llms import LlamaCpp
 from sentence_transformers.cross_encoder import CrossEncoder
 import torch
 import time
+import numpy as np
+from rank_bm25 import BM25Okapi
+from langchain_core.documents import Document
 
 # Program config settings
 CONFIG = {
@@ -42,7 +45,8 @@ CONFIG = {
     "query_transformer_model": "mistral-q4",
     "extractor_confidence_threshold": 0.05,
     "retrieval_k": 20,
-    "top_k_results": 3
+    "top_k_results": 3,
+    "hybrid_rrf_k": 60          # Reciprocal Rank Fusion Constant "k"
 }
 
 # Display all embedded databases
@@ -75,7 +79,22 @@ class RAGPipeline:
         # Specify embedding function
         if self._embedding_function is None:
             print(f"Loading embedding model: {self.config['embedding_model']}...")
-            self._embedding_function = HuggingFaceEmbeddings(model_name=self.config["embedding_model"])
+
+            use_GPU = True
+            if use_GPU:
+                self._embedding_function = HuggingFaceEmbeddings(
+                    model_name = self.config["embedding_model"],
+                    encode_kwargs = {'normalize_embeddings': True}
+                )
+            else:
+                model_kwargs = {'device': 'cpu'}
+                encode_kwargs = {'normalize_embeddings': True}
+
+                self._embedding_function = HuggingFaceEmbeddings(
+                    model_name=self.config["embedding_model"],
+                    model_kwargs = model_kwargs,
+                    encode_kwargs = encode_kwargs
+                )
         return self._embedding_function
 
     @property
@@ -95,7 +114,30 @@ class RAGPipeline:
                                                              tokenizer=model_path, local_files_only=True)
         return self._extractor_pipelines[model_name]
 
-    # Clear cached Extractor and Re-Ranker from GPU
+    # Clear cached Embedder, Extractor, and Re-Ranker from GPU
+    def _clear_cached_embedder(self):
+        if self._embedding_function is None:
+            return
+
+        print("Clearing embedding model from VRAM...")
+
+        try:
+            if hasattr(self._embedding_function, "client"):
+                del self._embedding_function.client
+            del self._embedding_function
+
+        except AttributeError:
+            try:
+                del self._embedding_function
+            except Exception:
+                pass
+        except Exception as e:
+            pass
+
+        self._embedding_function = None
+        torch.cuda.empty_cache()
+        print("VRAM cleared.")
+
     def _clear_cached_specialists(self):
         if self._reranker_model is None and not self._extractor_pipelines:
             return
@@ -209,6 +251,10 @@ Ideal Search Query:
 
             if not retrieved_docs: return "No documents were retrieved from the database.", []
 
+            ######## Setup the way to allow user to select if embedder uses RAM or VRAM to facilitate use of this
+            print("  -> Retrieval complete. Clearing embedder from VRAM...")
+            self._clear_cached_embedder()
+
             step_num = 3 if use_query_transform else 2
             total_steps = 5 if use_query_transform else 4
             if status_callback: status_callback(f"Step {step_num}/{total_steps}: Re-ranking retrieved chunks...")
@@ -255,23 +301,97 @@ Ideal Search Query:
     def _load_databases(self, selected_db):
         dbs = []
         db_names_to_load = list_databases() if selected_db == "All" else selected_db.split(',')
+
         for db_name in db_names_to_load:
             db_path = os.path.join(self.config["chroma_base_path"], db_name)
             if os.path.exists(db_path):
                 print(f"  -> Loading DB from: '{db_path}'")
-                dbs.append(Chroma(persist_directory=db_path, embedding_function=self.embedding_function))
+
+                ### Hybrid Retrieval
+                # Part 1: Loading Chroma (Dense)
+                chroma_db = Chroma(persist_directory=db_path, embedding_function=self.embedding_function)
+
+                # Part 2: Build BM25 index from Chroma (Sparse)
+                print(f"  -> Building in-memory BM25 index for '{db_name}'...")
+                try:
+                    # Get all documents saved in the Chroma collection
+                    all_docs_data = chroma_db.get(include=["documents", "metadatas"])
+
+                    # Reconstructing full Document objects
+                    corpus_docs = []
+                    for i, content in enumerate(all_docs_data['documents']):
+                        metadata = all_docs_data['metadatas'][i]
+                        corpus_docs.append(Document(page_content=content, metadata=metadata))
+
+                    if not corpus_docs:
+                        print(f"    -> WARNING: No documents found in '{db_name}'. Skipping BM25.")
+                        continue
+
+                    # Create the tokenized corpus for BM25
+                    tokenized_corpus = [doc.page_content.split(" ") for doc in corpus_docs]
+                    bm25_index = BM25Okapi(tokenized_corpus)
+
+                    # Part 3: Store Dense and Sparse results
+                    dbs.append((chroma_db, bm25_index, corpus_docs))
+                except Exception as e:
+                    print(f"    -> ERROR: Failed to build BM25 index for '{db_name}'. Skipping. Error {e}")
+            else:
+                print(f"  -> WARNING: Database path not found '{db_name}'")
         return dbs
 
     def _retrieve_docs(self, dbs, query_text):
-        results_with_scores = []
-        for db in dbs:
-            results_with_scores.extend(
-                db.similarity_search_with_relevance_scores(query_text, k=self.config["retrieval_k"]))
-        unique_docs_map = {}
-        for doc, score in results_with_scores:
-            if doc.page_content not in unique_docs_map or score > unique_docs_map[doc.page_content][1]:
-                unique_docs_map[doc.page_content] = (doc, score)
-        return [doc for doc, score in unique_docs_map.values()]
+        RRF_K = self.config.get("hybrid_rrf_k", 60)
+        retrieval_k = self.config["retrieval_k"]
+
+        fused_results = {}
+        tokenized_query = query_text.split(" ")
+
+        # 'db' is a list of tuples now (the return of _load_databases)
+        for db, bm25, corpus_docs in dbs:
+            # Part 1: Chroma (Dense)
+            dense_results_with_scores = db.similarity_search_with_relevance_scores(query_text, k=retrieval_k)
+            dense_results = [doc for doc, score in dense_results_with_scores]
+
+            # Part 2: BM25 (Sparse)
+            sparse_scores = bm25.get_scores(tokenized_query)
+            top_k_indices = np.argsort(sparse_scores)[::-1][:retrieval_k]
+            sparse_results = [corpus_docs[i] for i in top_k_indices if sparse_scores[i] > 0]
+
+            # Part 3: Reciprocal Rank Fusion (RRF)
+            # Adding a score to each doc based on its rank in each list. Higher score if in both lists
+
+            # Process dense results
+            for i, doc in enumerate(dense_results):
+                rank = i + 1
+                rrf_score = 1.0 / (RRF_K + rank)
+
+                doc_content = doc.page_content
+                if doc_content not in fused_results:
+                    fused_results[doc_content] = (doc, rrf_score)
+                else:
+                    # Adding score if already present
+                    fused_results[doc_content] = (fused_results[doc_content][0], fused_results[doc_content][1] + rrf_score)
+
+            # Process sparse results
+            for i, doc in enumerate(sparse_results):
+                rank = i + 1
+                rrf_score = 1.0 / (RRF_K + rank)
+
+                doc_content = doc.page_content
+                if doc_content not in fused_results:
+                    fused_results[doc_content] = (doc, rrf_score)
+                else:
+                    fused_results[doc_content] = (fused_results[doc_content][0], fused_results[doc_content][1] + rrf_score)
+
+        # Sorting the fused list by RFF score
+        sorted_fused_list = sorted(fused_results.values(), key=lambda x: x[1], reverse=True)
+
+        #Return Document objects
+        final_docs = [doc for doc, score in sorted_fused_list]
+
+        print(f"  -> Hybrid retrieval: Found {len(dense_results)} dense, {len(sparse_results)} sparse. Fused to {len(final_docs)} unique docs.")
+
+        return final_docs
 
     def _rerank_docs(self, query_text, docs):
         pairs = [[query_text, doc.page_content] for doc in docs]

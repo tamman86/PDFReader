@@ -61,7 +61,7 @@ class DocumentDatabaseGUI:
 
         # UI Setup
 
-        # Model Download Button
+        ###### Model Download Button #####
         setup_frame = tk.LabelFrame(root, text="Initial Setup", padx=10, pady=10)
         setup_frame.pack(padx=10, pady=10, fill="x")
 
@@ -72,7 +72,9 @@ class DocumentDatabaseGUI:
             bg="#D6EAF8" # Light Blue
         ).pack(pady=5)
 
-        # Database Creation Frame
+        ###################################
+
+        ##### Database Creation Frame #####
         self.create_db_frame = tk.LabelFrame(root, text="1. Create or Re-build a Database", padx=10, pady=10)
         self.create_db_frame.pack(padx=10, pady=10, fill="x")
 
@@ -102,7 +104,9 @@ class DocumentDatabaseGUI:
         # Create database button
         tk.Button(self.create_db_frame, text="Create Database", command=self.create_database).grid(row=4, column=1, pady=10)
 
-        # 2. Query Frame
+        ####################################
+
+        ##### Query Frame #####
         self.query_frame = tk.LabelFrame(root, text="2. Query Databases", padx=10, pady=10)
         self.query_frame.pack(padx=10, pady=10, fill="both", expand=True)
 
@@ -142,7 +146,9 @@ class DocumentDatabaseGUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Query and response section
+        ######################################
+
+        ##### Query and response section #####
         query_controls_frame = tk.Frame(self.query_frame)
         query_controls_frame.pack(fill="both", expand=True, pady=(10,0))
 
