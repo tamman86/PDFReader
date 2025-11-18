@@ -193,7 +193,7 @@ class DocumentDatabaseGUI:
         settings_frame.pack(anchor="w", pady=5)
         tk.Label(settings_frame, text="Relevance Threshold:").pack(side="left")
         self.relevance_entry = tk.Entry(settings_frame, width=10)
-        self.relevance_entry.insert(0, "0.3")
+        self.relevance_entry.insert(0, "0.5")
         self.relevance_entry.pack(side="left", padx=(5, 20))
 
         tk.Label(settings_frame, text="Temperature:").pack(side="left")

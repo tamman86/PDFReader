@@ -44,8 +44,8 @@ CONFIG = {
     },
     "query_transformer_model": "mistral-q4",
     "extractor_confidence_threshold": 0.05,
-    "retrieval_k": 20,
-    "top_k_results": 3,
+    "retrieval_k": 60,
+    "top_k_results": 5,
     "hybrid_rrf_k": 60          # Reciprocal Rank Fusion Constant "k"
 }
 
@@ -220,9 +220,9 @@ Ideal Search Query:
         return transformed_query
 
     # Main engine to find relevant spans based on prompts and generate a Natural Language response
-    def answer_question(self, query_text, selected_db="All", relevance_threshold=0.3, temperature=0.7,
+    def answer_question(self, query_text, selected_db="All", relevance_threshold=0.5, temperature=0.7,
                         generator_name="mistral-q4", use_query_transform=False, status_callback=None):
-
+        high_confidence_threshold = 0.8
         if status_callback: status_callback("Starting query process...")
 
         try:
@@ -262,9 +262,43 @@ Ideal Search Query:
             # Step 2: Re-ranking - Ranking the pulled chunks so the generator has a priority list
             print("Step 2: Re-ranking retrieved chunks...")
             reranked_results = self._rerank_docs(query_text, retrieved_docs)
-            if not reranked_results or reranked_results[0][
-                1] < relevance_threshold: return "No relevant results found after re-ranking.", []
-            top_docs_with_scores = reranked_results[:self.config["top_k_results"]]
+
+            if not reranked_results:
+                return "No relevant results found after re-ranking.", []
+
+            best_score = reranked_results[0][1]
+            confidence_level = "none"
+            top_docs_with_scores = []
+
+            # For NO confidence results (score < 0.5)
+            if best_score < relevance_threshold:
+                print(f"  -> Best score ({best_score:.4f}) is below low_confidence_threshold ({relevance_threshold}).")
+                return "I could not find any relevant information in the documents.", []
+
+            # For High confidence results (score > 0.8)
+            elif best_score > high_confidence_threshold:
+                print(f"  -> Best score ({best_score:.4f}) is HIGH confidence.")
+                confidence_level = "high"
+
+                high_confidence_docs = [
+                    (doc, score) for doc, score in reranked_results
+                    if score >= high_confidence_threshold
+                ]
+                top_docs_with_scores = high_confidence_docs[:self.config["top_k_results"]]
+
+            # For Low confidence results (0.5 < score < 0.8)
+            else:
+                print(f"  -> Best score ({best_score:.4f}) is LOW confidence.")
+                confidence_level = "low"
+
+                low_confidence_docs = [
+                    (doc, score) for doc, score in reranked_results
+                    if score >= relevance_threshold
+                ]
+
+                top_docs_with_scores = low_confidence_docs[:self.config["top_k_results"]]
+
+            print(f"  -> Selected {len(top_docs_with_scores)} chunks for extraction.")
 
             step_num += 1
             if status_callback: status_callback(f"Step {step_num}/{total_steps}: Extracting specific answers...")
@@ -287,7 +321,7 @@ Ideal Search Query:
             # Step 4: Generation - Stream the answer
             print("Step 4: Generating final answer...")
             # Use 'yield from' to pass all items from the _generate_answer generator
-            yield from self._generate_answer(query_text, top_extractions, generator_name, temperature)
+            yield from self._generate_answer(query_text, top_extractions, generator_name, temperature, confidence_level)
 
             if status_callback: status_callback("Done.")
 
@@ -455,78 +489,138 @@ Ideal Search Query:
         return top_extractions
 
     # Tailored generator prompt formation
-    def _generate_answer(self, query_text, top_extractions, generator_name, temperature):
+    def _generate_answer(self, query_text, top_extractions, generator_name, temperature, confidence_level="high"):
         context_for_prompt = "\n".join(
             [f"{i + 1}. {ex['context']}" for i, ex in enumerate(top_extractions[:self.config["top_k_results"]])]
         )
 
         generator_prompt = ""
-        if generator_name == "mistral-q4" or generator_name == "mistral-q3":
-            generator_prompt = f"""You are an expert technical assistant. Your task is to synthesize the following extracted pieces of information into a single, coherent, and precise answer.
 
-**CRITICAL RULES:**
-1. You MUST cite the information you use.
-2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
-3. Every piece of information in your answer must be followed by its citation.
-4. If multiple pieces of information come from the same source, cite it each time.
-5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+        ##### Low Confidence Prompts
+        if confidence_level == "low":
+            print("  -> Using LOW CONFIDENCE (cautious) generator prompts.")
+            context_for_prompt = "\n".join(
+                [f"{i + 1}. {ex['context']}" for i, ex in enumerate(top_extractions[:self.config["top_k_results"]])]
+            )
 
-**EXAMPLE:**
-An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+            # Cautious prompt for Mistral
+            if "mistral" in generator_name or "zephyr" in generator_name:
+                generator_prompt = f"""You are a cautious technical assistant. The following information *may* be related to the user's question, but its relevance score is low.
 
-USER'S QUESTION:
-"{query_text}"
+        **CRITICAL RULES:**
+        1. Carefully analyze the provided information and the user's question.
+        2. If the information *directly* and *unambiguously* answers the question, provide the answer and cite it using `[n]`.
+        3. **If the information is only vaguely related, speculative, or does not answer the core question, YOU MUST NOT use it.**
+        4. In that case (Rule 3), you must respond with ONLY the following exact text:
+        `I could not find a specific answer for your query in the documents.`
 
-RELEVANT EXTRACTED INFORMATION:
-{context_for_prompt}
+        **EXAMPLE (if you answer):**
+        An indoor tank vent must terminate to the outside of the building [1].
 
-Based ONLY on the information and rules above, provide a comprehensive and heavily cited answer:
-"""
+        USER'S QUESTION:
+        "{query_text}"
 
-        elif generator_name == "zephyr-q4":
-            generator_prompt = f"""You are an expert explainer. Your task is to summarize the key findings from the following extracted information and explain the main concept in clear, easy-to-understand language.
+        POTENTIALLY RELEVANT INFORMATION:
+        {context_for_prompt}
 
-**CRITICAL RULES:**
-1. You MUST cite the information you use.
-2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
-3. Every piece of information in your answer must be followed by its citation.
-4. If multiple pieces of information come from the same source, cite it each time.
-5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+        Based ONLY on the information and rules above, provide a cited answer OR the exact refusal text:
+        """
+            # Cautious prompt for CodeLlama
+            elif "codellama" in generator_name:
+                generator_prompt = f"""You are a cautious code analyst. The following code snippets or procedures *may* be related to the user's question, but their relevance score is low.
 
-**EXAMPLE:**
-An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+        **CRITICAL RULES:**
+        1. Carefully analyze the provided information and the user's question.
+        2. If the information *directly* and *unambiguously* answers the question, provide the answer/code and cite it using `[n]`.
+        3. **If the information is only vaguely related, speculative, or does not answer the core question, YOU MUST NOT use it.**
+        4. In that case (Rule 3), you must respond with ONLY the following exact text:
+        `I could not find a specific technical answer for your query in the documents.`
 
-USER'S QUESTION:
-"{query_text}"
+        USER'S QUESTION:
+        "{query_text}"
 
-RELEVANT EXTRACTED INFORMATION:
-{context_for_prompt}
+        POTENTIALLY RELEVANT INFORMATION:
+        {context_for_prompt}
 
-Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question with citations.
-"""
+        Based ONLY on the information and rules above, provide a cited answer OR the exact refusal text:
+        """
 
-        elif generator_name == "codellama-q4":
-            generator_prompt = f"""You are a senior software engineer and code analyst. Your task is to analyze the following extracted information to answer the user's question, which may be about code, logic, or technical procedures.
-
-**CRITICAL RULES:**
-1. You MUST cite the information you use.
-2. To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
-3. Every piece of information in your answer must be followed by its citation.
-4. If multiple pieces of information come from the same source, cite it each time.
-5. Base your answer ONLY on the information provided below. Do not use any outside knowledge.
-
-**EXAMPLE:**
-An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
-
-USER'S QUESTION:
-"{query_text}"
-
-RELEVANT EXTRACTED INFORMATION:
-{context_for_prompt}
-
-Based ONLY on the information provided, explain the code or logic in detail with citations. If appropriate, provide a clear, commented code example.
-"""
+        ##### High Confidence Prompt
         else:
+            print("  -> Using HIGH CONFIDENCE (expert) generator prompts.")
+            context_for_prompt = "\n".join(
+                [f"{i + 1}. {ex['context']}" for i, ex in enumerate(top_extractions[:self.config["top_k_results"]])]
+            )
+
+            if generator_name == "mistral-q4" or generator_name == "mistral-q3":
+                generator_prompt = f"""You are an expert technical assistant. Your task is to answer the user's question directly, then provide supporting details.
+
+        **CRITICAL RULES:**
+        1. **ANSWER STRUCTURE:** You MUST start with the direct, concise answer to the user's question in the first sentence. After the direct answer, provide the supporting details, reasoning, or context.
+        2. **CITATIONS:** You MUST cite the information you use.
+        3. **FORMAT:** To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+        4. Every piece of information in your answer must be followed by its citation.
+        5. If multiple pieces of information come from the same source, cite it each time.
+        6. **SCOPE:** Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+        **EXAMPLE:**
+        An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
+        USER'S QUESTION:
+        "{query_text}"
+
+        RELEVANT EXTRACTED INFORMATION:
+        {context_for_prompt}
+
+        Based ONLY on the information and rules above, provide a comprehensive and heavily cited answer:
+        """
+
+            elif generator_name == "zephyr-q4":
+                generator_prompt = f"""You are an expert explainer. Your task is to summarize the key findings from the following extracted information and explain the main concept in clear, easy-to-understand language.
+
+        **CRITICAL RULES:**
+        1. **ANSWER STRUCTURE:** You MUST start with the direct, concise answer to the user's question in the first sentence. After the direct answer, provide the supporting explanation and context.
+        2. **CITATIONS:** You MUST cite the information you use.
+        3. **FORMAT:** To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+        4. Every piece of information in your answer must be followed by its citation.
+        5. If multiple pieces of information come from the same source, cite it each time.
+        6. **SCOPE:** Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+        **EXAMPLE:**
+        An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
+        USER'S QUESTION:
+        "{query_text}"
+
+        RELEVANT EXTRACTED INFORMATION:
+        {context_for_prompt}
+
+        Based ONLY on the information provided, summarize the relevant points and provide a clear explanation that directly answers the user's question with citations.
+        """
+
+            elif generator_name == "codellama-q4":
+                generator_prompt = f"""You are a senior software engineer and code analyst. Your task is to analyze the following extracted information to answer the user's question, which may be about code, logic, or technical procedures.
+
+        **CRITICAL RULES:**
+        1. **ANSWER STRUCTURE:** You MUST start with the direct, concise answer to the user's question in the first sentence. After the direct answer, provide the supporting explanation and context.
+        2. **CITATIONS:** You MUST cite the information you use.
+        3. **FORMAT:** To cite, you MUST use the format `[n]` where `n` corresponds to the number from the RELEVANT EXTRACTED INFORMATION list.
+        4. Every piece of information in your answer must be followed by its citation.
+        5. If multiple pieces of information come from the same source, cite it each time.
+        6. **SCOPE:** Base your answer ONLY on the information provided below. Do not use any outside knowledge.
+
+        **EXAMPLE:**
+        An indoor tank vent must terminate to the outside of the building [1]. This is a critical safety measure [2].
+
+        USER'S QUESTION:
+        "{query_text}"
+
+        RELEVANT EXTRACTED INFORMATION:
+        {context_for_prompt}
+
+        Based ONLY on the information provided, explain the code or logic in detail with citations. If appropriate, provide a clear, commented code example.
+        """
+        if not generator_prompt:
             generator_prompt = context_for_prompt  # Fallback to just context
 
         print("\n🧠 Prompt to Generator:\n", generator_prompt)
