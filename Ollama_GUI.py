@@ -208,6 +208,7 @@ class DocumentDatabaseGUI:
         tk.Label(query_controls_frame, text="Answer:").pack(anchor="w")
         self.result_text = scrolledtext.ScrolledText(query_controls_frame, height=10, wrap="word")
         self.result_text.pack(pady=5, fill="both", expand=True)
+        self.result_text.tag_configure("suggestion_tag", foreground="#FF8C00", font=("Helvetica", 10, "bold"))
 
         self.database_vars = []
         self.load_databases_to_gui()
@@ -381,6 +382,9 @@ class DocumentDatabaseGUI:
                     # Received the sources, store them in our instance variable
                     self.current_sources = item_data
 
+                elif item_type == "suggestion":
+                    self.display_suggestion(item_data)
+
                 elif item_type == "token":
                     # Received a text token, append it to the GUI
                     self.append_to_result_text(item_data)
@@ -427,6 +431,27 @@ class DocumentDatabaseGUI:
             self.result_text.config(state=tk.NORMAL)
             self.result_text.insert("1.0", text)
             self.result_text.config(state=tk.DISABLED)
+
+        self.root.after(0, task)
+
+    def display_suggestion(self, suggestions_list):
+        def task():
+            if not suggestions_list:
+                return
+
+            try:
+                suggest_text = "\n".join(suggestions_list)
+
+                # Insert at "1.0" (the very top)
+                self.result_text.config(state=tk.NORMAL)
+                self.result_text.insert(
+                    "1.0",
+                    f"[SUGGESTION] For more context, try adding these databases to your search:\n{suggest_text}\n\n",
+                    "suggestion_tag"
+                )
+                self.result_text.config(state=tk.DISABLED)
+            except Exception as e:
+                print(f"Error displaying suggestion: {e}")
 
         self.root.after(0, task)
 
@@ -483,3 +508,4 @@ if __name__ == "__main__":
     app = DocumentDatabaseGUI(root)
     root.mainloop()
 
+"I just ran a deliberate experiment to check the utility of the safety net. I uploaded two documents: One on Oil and Gas storage tanks and another with a little biography of myself. I selected the biography for the query but asked a storage tank related question. The program did the correct thing in terms of query response by indicating it was a low confidence result so no answer was given but it did not give the suggestion that the other document may be a better fit. Can we take a look at the order of these so that the program can provide the suggestion regardless of high, mid, or low confidence responses?"

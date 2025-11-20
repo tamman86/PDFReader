@@ -65,6 +65,18 @@ def list_databases():
     return databases
 
 
+def get_database_description(db_name: str) -> str:
+    base_path = CONFIG["chroma_base_path"]
+    description_path = os.path.join(base_path, db_name, "description.txt")
+
+    if os.path.exists(description_path):
+        try:
+            with open(description_path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        except Exception:
+            return ""               # Return empty if file is unreadable
+    return ""                       # Return empty if no file exists
+
 # Class used for loading models and executing queries
 class RAGPipeline:
     def __init__(self, config):
@@ -262,6 +274,37 @@ Ideal Search Query:
             # Step 2: Re-ranking - Ranking the pulled chunks so the generator has a priority list
             print("Step 2: Re-ranking retrieved chunks...")
             reranked_results = self._rerank_docs(query_text, retrieved_docs)
+
+            # Safety net document suggester
+            try:
+                if selected_db != "All":
+                    print("  -> Running 'Safety Net' check on unselected DBs...")
+                    all_dbs = list_databases()
+                    selected_dbs_list = selected_db.split(',')
+                    unselected_dbs = [db for db in all_dbs if db not in selected_dbs_list]
+
+                    suggestion_threshold = 0.5
+                    suggestions = []
+
+                    for db_name in unselected_dbs:
+                        summary = get_database_description(db_name)
+                        if not summary: continue
+
+                        # Use the already-loaded reranker model
+                        pair = [query_text, summary]
+                        raw_score = self.reranker_model.predict([pair])[0]
+
+                        prob_score = torch.sigmoid(torch.tensor(raw_score)).item()
+
+                        if prob_score > suggestion_threshold:
+                            print(f"    -> Suggestion Found! DB: '{db_name}' | Score: {prob_score:.4f}")
+                            suggestions.append(db_name)
+
+                    if suggestions:
+                        yield {"type": "suggestion", "data": suggestions}
+
+            except Exception as e:
+                print(f"  -> ERROR in 'Safety Net' check: {e}")
 
             if not reranked_results:
                 return "No relevant results found after re-ranking.", []
