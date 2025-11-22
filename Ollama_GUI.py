@@ -1,21 +1,30 @@
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
 import threading
 import os
-os.environ['HF_HUB_OFFLINE'] = '1' # Keep HuggingFace from online communication
 import shutil
 import re
 import time
+from dotenv import load_dotenv
 
+# --- Backend Imports ---
 from Ollama_DB import DatabaseBuilder, CONFIG as DB_CONFIG
 from Ollama_Readerv2 import RAGPipeline, CONFIG as READER_CONFIG, list_databases
 from Download_Model import ModelDownloader, MODELS_TO_DOWNLOAD, LOCAL_MODEL_DIR
-from dotenv import load_dotenv
+
+# --- Configuration ---
+os.environ['HF_HUB_OFFLINE'] = '1'  # Keep HuggingFace offline
 load_dotenv()
 HuggingFaceToken = os.getenv("HUGGINGFACE_TOKEN")
 
-# Tooltips for citations
-class ToolTip:
+# Set the Theme
+ctk.set_appearance_mode("Dark")  # Modes: "System" (standard), "Dark", "Light"
+ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
+
+
+class ModernToolTip:
+
     def __init__(self, widget, text):
         self.widget = widget
         self.text = text
@@ -25,311 +34,284 @@ class ToolTip:
         x = event.x_root + 20
         y = event.y_root + 10
 
-        # Create a Toplevel window
         self.tooltip_window = tk.Toplevel(self.widget)
-        self.tooltip_window.wm_overrideredirect(True) # Removes window borders
+        self.tooltip_window.wm_overrideredirect(True)
         self.tooltip_window.wm_geometry(f"+{x}+{y}")
 
-        # Style the label inside the popup
+        # Dark mode style for the tooltip
         label = tk.Label(self.tooltip_window, text=self.text, justify=tk.LEFT,
-                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                         wraplength=500) # Wraps long source text
-        label.pack(ipadx=1)
+                         background="#2B2B2B", foreground="#FFFFFF",
+                         relief=tk.SOLID, borderwidth=1,
+                         wraplength=600, font=("Roboto", 12))
+        label.pack(ipadx=10, ipady=10)
 
     def hide(self, event=None):
         if self.tooltip_window:
             self.tooltip_window.destroy()
         self.tooltip_window = None
 
-class DocumentDatabaseGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Document Database Manager")
-        self.root.geometry("800x850")
+
+class DocumentDatabaseGUI(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        # Window Setup
+        self.title("AI Document Assistant")
+        self.geometry("1100x850")
 
         # Initialize Backend Pipelines
-        print("Initializing backend pipelines... (This may take a moment)")
+        print("Initializing backend pipelines...")
         self.db_builder = DatabaseBuilder(DB_CONFIG)
         self.rag_pipeline = RAGPipeline(READER_CONFIG)
         self.model_downloader = ModelDownloader(MODELS_TO_DOWNLOAD, LOCAL_MODEL_DIR, HuggingFaceToken)
         print("✅ Pipelines initialized.")
 
         self.current_sources = []
+        self.database_vars = []
 
-        # Variable for selected generator (Mistral default)
-        self.selected_generator_model = tk.StringVar(value="mistral-q4")
+        # Layout Configuration (2 Columns)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        # UI Setup
+        # ============================
+        # LEFT SIDEBAR (Setup & Tools)
+        # ============================
+        self.sidebar_frame = ctk.CTkFrame(self, width=300, corner_radius=0)
+        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_frame.grid_rowconfigure(10, weight=1)  # Spacing filler
 
-        ###### Model Download Button #####
-        setup_frame = tk.LabelFrame(root, text="Initial Setup", padx=10, pady=10)
-        setup_frame.pack(padx=10, pady=10, fill="x")
+        # App Title in Sidebar
+        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="DocuMind AI", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-        tk.Button(
-            setup_frame,
-            text="Download All Required Models",
-            command=self.download_all_models,
-            bg="#D6EAF8" # Light Blue
-        ).pack(pady=5)
+        # --- Section: Model Setup ---
+        self.dl_btn = ctk.CTkButton(self.sidebar_frame, text="Check/Download Models", command=self.download_all_models,
+                                    fg_color="#2E86C1")
+        self.dl_btn.grid(row=1, column=0, padx=20, pady=10)
 
-        ###################################
+        # --- Section: Create Database ---
+        self.create_label = ctk.CTkLabel(self.sidebar_frame, text="Create New Database", anchor="w")
+        self.create_label.grid(row=2, column=0, padx=20, pady=(20, 5), sticky="w")
 
-        ##### Database Creation Frame #####
-        self.create_db_frame = tk.LabelFrame(root, text="1. Create or Re-build a Database", padx=10, pady=10)
-        self.create_db_frame.pack(padx=10, pady=10, fill="x")
+        # File Selection
+        self.file_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="File Path")
+        self.file_entry.grid(row=3, column=0, padx=20, pady=(0, 5), sticky="ew")
 
-        # Select file to be chunked/embedded
-        tk.Label(self.create_db_frame, text="Select File:").grid(row=0, column=0, sticky="w", pady=2)
-        self.file_path_entry = tk.Entry(self.create_db_frame, width=50)
-        self.file_path_entry.grid(row=0, column=1, padx=5)
-        tk.Button(self.create_db_frame, text="Browse...", command=self.browse_file).grid(row=0, column=2)
+        self.browse_btn = ctk.CTkButton(self.sidebar_frame, text="Browse File...", command=self.browse_file, height=25)
+        self.browse_btn.grid(row=4, column=0, padx=20, pady=(0, 10), sticky="ew")
 
-        # User selected title for processed document
-        tk.Label(self.create_db_frame, text="Document Title:").grid(row=1, column=0, sticky="w", pady=2)
-        self.title_entry = tk.Entry(self.create_db_frame, width=50)
-        self.title_entry.grid(row=1, column=1, padx=5)
+        # Meta Data
+        self.title_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="Document Title")
+        self.title_entry.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
 
-        # User specified revision for processed document
-        tk.Label(self.create_db_frame, text="Document Revision:").grid(row=2, column=0, sticky="w", pady=2)
-        self.revision_entry = tk.Entry(self.create_db_frame, width=50)
-        self.revision_entry.grid(row=2, column=1, padx=5)
+        self.rev_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="Revision (e.g., 1.0)")
+        self.rev_entry.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
 
-        # User specified chunk size determination
-        tk.Label(self.create_db_frame, text="Chunk Size:").grid(row=3, column=0, sticky="w", pady=2)
-        self.chunk_size_var = tk.StringVar(value="300")  # Default value set to 300
-        chunk_size_options = ["200", "300", "500", "700", "1024"]   # Chunk size options
-        self.chunk_size_dropdown = tk.OptionMenu(self.create_db_frame, self.chunk_size_var, *chunk_size_options)
-        self.chunk_size_dropdown.grid(row=3, column=1, sticky="w", padx=5)
+        # Chunk Size
+        self.chunk_label = ctk.CTkLabel(self.sidebar_frame, text="Chunk Size:", anchor="w")
+        self.chunk_label.grid(row=7, column=0, padx=20, pady=(10, 0), sticky="w")
 
-        # Create database button
-        tk.Button(self.create_db_frame, text="Create Database", command=self.create_database).grid(row=4, column=1, pady=10)
+        self.chunk_size_var = ctk.StringVar(value="300")
+        self.chunk_option = ctk.CTkOptionMenu(self.sidebar_frame, variable=self.chunk_size_var,
+                                              values=["200", "300", "500", "700", "1024"])
+        self.chunk_option.grid(row=8, column=0, padx=20, pady=(0, 10), sticky="ew")
 
-        ####################################
+        # Create Action
+        self.create_btn = ctk.CTkButton(self.sidebar_frame, text="Process & Embed", command=self.create_database,
+                                        fg_color="green")
+        self.create_btn.grid(row=9, column=0, padx=20, pady=10, sticky="ew")
 
-        ##### Query Frame #####
-        self.query_frame = tk.LabelFrame(root, text="2. Query Databases", padx=10, pady=10)
-        self.query_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        # --- Section: Maintenance ---
+        # Spacer used in row 10
+        self.delete_btn = ctk.CTkButton(self.sidebar_frame, text="Delete Selected DBs",
+                                        command=self.delete_selected_databases,
+                                        fg_color="transparent", border_width=1, text_color="#FF5555",
+                                        hover_color="#550000")
+        self.delete_btn.grid(row=11, column=0, padx=20, pady=20, sticky="ew")
 
-        # Creation and maintenance of status bar
-        self.status_var = tk.StringVar(value="Ready.")
-        self.status_bar = tk.Label(root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W, padx=5)
-        self.status_bar.pack(side=tk.BOTTOM, fill="x")
+        # ============================
+        # RIGHT MAIN AREA (Query)
+        # ============================
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        self.main_frame.grid_rowconfigure(3, weight=1)  # Make result box expandable
 
-        # Database search bar
-        db_management_frame = tk.Frame(self.query_frame)
-        db_management_frame.pack(fill="x", pady=(0, 10))
-        tk.Label(db_management_frame, text="Search Databases:").pack(side="left", padx=(0, 5))
-        self.search_entry = tk.Entry(db_management_frame, width=40)
-        self.search_entry.pack(side="left", fill="x", expand=True)
-        # The on_search_change function allows for instant search updates
+        # --- 1. Database Selection ---
+        self.search_entry = ctk.CTkEntry(self.main_frame, placeholder_text="Search Available Databases...")
+        self.search_entry.pack(fill="x", pady=(0, 10))
         self.search_entry.bind("<KeyRelease>", self.on_search_change)
 
-        # Database deletion button
-        tk.Button(db_management_frame, text="Delete Selected", command=self.delete_selected_databases, fg="red").pack(
-            side="right", padx=(10, 0))
+        # Replaced Canvas with CTkScrollableFrame
+        self.db_list_frame = ctk.CTkScrollableFrame(self.main_frame, height=150, label_text="Select Databases to Query")
+        self.db_list_frame.pack(fill="x", pady=(0, 10))
 
-        # Create scrollable database selection area
-        db_list_container = tk.Frame(self.query_frame)
-        db_list_container.pack(fill="x", pady=5)
-        db_list_container.config(height=100)
+        # --- 2. Query Controls ---
+        self.query_frame = ctk.CTkFrame(self.main_frame)
+        self.query_frame.pack(fill="x", pady=(0, 10))
 
-        canvas = tk.Canvas(db_list_container, height=100)
-        scrollbar = tk.Scrollbar(db_list_container, orient="vertical", command=canvas.yview)
-        self.scrollable_db_frame = tk.Frame(canvas)
+        # Query Input
+        self.query_entry = ctk.CTkEntry(self.query_frame, placeholder_text="Type your question here...", height=40)
+        self.query_entry.pack(fill="x", padx=10, pady=(10, 5))
 
-        self.scrollable_db_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        canvas.create_window((0, 0), window=self.scrollable_db_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # Options Grid
+        self.opts_frame = ctk.CTkFrame(self.query_frame, fg_color="transparent")
+        self.opts_frame.pack(fill="x", padx=10, pady=5)
 
-        ######################################
+        self.query_transform_var = ctk.BooleanVar(value=False)
+        self.transform_check = ctk.CTkCheckBox(self.opts_frame, text="AI Query Transform",
+                                               variable=self.query_transform_var)
+        self.transform_check.pack(side="left", padx=10)
 
-        ##### Query and response section #####
-        query_controls_frame = tk.Frame(self.query_frame)
-        query_controls_frame.pack(fill="both", expand=True, pady=(10,0))
-
-        tk.Label(query_controls_frame, text="Your Question:").pack(anchor="w")
-        self.query_entry = tk.Entry(query_controls_frame, width=80)
-        self.query_entry.pack(pady=5, fill="x")
-
-        # AI-assisted query transform
-        self.query_transform_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            query_controls_frame,
-            text="Query Transform Assist? (Slower, but may improve relevance)",
-            variable=self.query_transform_var
-        ).pack(anchor="w")
-
-        # Adding radio buttons for generator model selection
-        model_selection_frame = tk.LabelFrame(query_controls_frame, text="Select Generator Model", padx=10, pady=5)
-        model_selection_frame.pack(fill="x", pady=(10, 5))
-
-        tk.Radiobutton(
-            model_selection_frame, text="Balanced (Mistral)", variable=self.selected_generator_model,
-            value="mistral-q4"
-        ).pack(side="left", padx=10)
-
-        tk.Radiobutton(
-            model_selection_frame, text="Fast (Mistral)", variable=self.selected_generator_model,
-            value="mistral-q3"
-        ).pack(side="left", padx=10)
-
-        tk.Radiobutton(
-            model_selection_frame, text="Summarization (Zephyr)", variable=self.selected_generator_model,
-            value="zephyr-q4"
-        ).pack(side="left", padx=10)
-
-        tk.Radiobutton(
-            model_selection_frame, text="Coding & Logic (CodeLlama)", variable=self.selected_generator_model,
-            value="codellama-q4"
-        ).pack(side="left", padx=10)
-
-        # Relevance Threshold and Temperature User input
-        settings_frame = tk.Frame(query_controls_frame)
-        settings_frame.pack(anchor="w", pady=5)
-        tk.Label(settings_frame, text="Relevance Threshold:").pack(side="left")
-        self.relevance_entry = tk.Entry(settings_frame, width=10)
+        self.relevance_entry = ctk.CTkEntry(self.opts_frame, width=60)
         self.relevance_entry.insert(0, "0.5")
-        self.relevance_entry.pack(side="left", padx=(5, 20))
+        ctk.CTkLabel(self.opts_frame, text="Relevance:").pack(side="left", padx=(10, 5))
+        self.relevance_entry.pack(side="left")
 
-        tk.Label(settings_frame, text="Temperature:").pack(side="left")
-        self.temperature_entry = tk.Entry(settings_frame, width=10)
-        self.temperature_entry.insert(0, "0.2")
-        self.temperature_entry.pack(side="left", padx=5)
+        self.temp_entry = ctk.CTkEntry(self.opts_frame, width=60)
+        self.temp_entry.insert(0, "0.2")
+        ctk.CTkLabel(self.opts_frame, text="Temp:").pack(side="left", padx=(10, 5))
+        self.temp_entry.pack(side="left")
 
-        # Submit Query button
-        tk.Button(query_controls_frame, text="Send Query", command=self.run_query).pack(pady=10)
+        # Model Selection (Radio Buttons)
+        self.model_frame = ctk.CTkFrame(self.main_frame)
+        self.model_frame.pack(fill="x", pady=(0, 10))
 
-        # Response window
-        tk.Label(query_controls_frame, text="Answer:").pack(anchor="w")
-        self.result_text = scrolledtext.ScrolledText(query_controls_frame, height=10, wrap="word")
-        self.result_text.pack(pady=5, fill="both", expand=True)
-        self.result_text.tag_configure("suggestion_tag", foreground="#FF8C00", font=("Helvetica", 10, "bold"))
+        self.selected_generator_model = tk.StringVar(value="mistral-q4")
+        models = [
+            ("Balanced (Mistral)", "mistral-q4"),
+            ("Fast (Mistral)", "mistral-q3"),
+            ("Summary (Zephyr)", "zephyr-q4"),
+            ("Code (CodeLlama)", "codellama-q4")
+        ]
 
-        self.database_vars = []
+        ctk.CTkLabel(self.model_frame, text="Generator:").pack(side="left", padx=10)
+        for text, val in models:
+            ctk.CTkRadioButton(self.model_frame, text=text, variable=self.selected_generator_model, value=val).pack(
+                side="left", padx=10, pady=10)
+
+        # Send Button
+        self.send_btn = ctk.CTkButton(self.main_frame, text="Send Query", command=self.run_query, height=40,
+                                      font=ctk.CTkFont(size=14, weight="bold"))
+        self.send_btn.pack(fill="x", pady=(0, 10))
+
+        # --- 3. Results Area ---
+        self.result_label = ctk.CTkLabel(self.main_frame, text="Response:", anchor="w")
+        self.result_label.pack(fill="x")
+
+        self.result_text = ctk.CTkTextbox(self.main_frame, wrap="word", font=("Roboto", 12))
+        self.result_text.pack(fill="both", expand=True)
+
+        # Configure Tags for the Textbox
+        self.result_text._textbox.tag_config("suggestion_tag", foreground="#FFAA00", font=("Roboto", 11, "bold"))
+        self.result_text.tag_config("citation_style", foreground="#3B8ED0", underline=True)
+
+        # --- Status Bar ---
+        self.status_var = tk.StringVar(value="Ready.")
+        self.status_bar = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", height=25, fg_color="#222222")
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
+
+        # Initial Load
         self.load_databases_to_gui()
 
-    # Model Downloader
+    # ==========================================
+    #  LOGIC METHODS
+    # ==========================================
+
     def download_all_models(self):
-        # Ask the user for confirmation before starting the large download.
-        if messagebox.askyesno("Confirm Download",
-                               "This will check for and download all required AI models (several GB). This may take a long time. Continue?"):
+        if messagebox.askyesno("Confirm Download", "Download all models? (Several GB)"):
             threading.Thread(target=self.process_downloads, daemon=True).start()
 
     def process_downloads(self):
         try:
             self.model_downloader.run_downloads(status_callback=self.update_status_text)
-            messagebox.showinfo("Success", "Model download process finished successfully!")
+            messagebox.showinfo("Success", "Downloads finished!")
         except Exception as e:
-            messagebox.showerror("Error", f"An error occurred during download: {e}")
+            messagebox.showerror("Error", f"{e}")
         finally:
             self.update_status_text("Ready.")
 
-    # File browser for selecting files to chunk/embed
     def browse_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Documents", "*.pdf;*.docx;*.md;*.txt")])
         if file_path:
-            self.file_path_entry.delete(0, tk.END)
-            self.file_path_entry.insert(0, file_path)
+            self.file_entry.delete(0, tk.END)
+            self.file_entry.insert(0, file_path)
             base_name = os.path.basename(file_path)
             title, _ = os.path.splitext(base_name)
             self.title_entry.delete(0, tk.END)
             self.title_entry.insert(0, title)
-            self.revision_entry.delete(0, tk.END)
-            self.revision_entry.insert(0, "1.0")
+            self.rev_entry.delete(0, tk.END)
+            self.rev_entry.insert(0, "1.0")
 
-    # Collect database inputs
     def create_database(self):
-        file_path = self.file_path_entry.get().strip()
+        file_path = self.file_entry.get().strip()
         title = self.title_entry.get().strip()
-        revision = self.revision_entry.get().strip()
+        revision = self.rev_entry.get().strip()
         chunk_size = int(self.chunk_size_var.get())
 
         if not all([file_path, title, revision]):
             messagebox.showerror("Error", "File, Title, and Revision are required.")
             return
 
+        self.update_status_text("Processing document...")
         threading.Thread(target=self.process_creation, args=(file_path, title, revision, chunk_size),
                          daemon=True).start()
 
-    # Provide success/fail response for chunking/embedding
     def process_creation(self, file_path, title, revision, chunk_size):
         try:
             self.db_builder.process_document(file_path, title, revision, chunk_size)
             messagebox.showinfo("Success", "Database created successfully!")
-            self.root.after(0, self.load_databases_to_gui)
+            self.after(0, self.load_databases_to_gui)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to create database: {e}")
+            messagebox.showerror("Error", f"Failed: {e}")
+        finally:
+            self.update_status_text("Ready.")
 
-    # Load embedded databases to selection list
     def load_databases_to_gui(self, search_term=""):
-        # Clear the existing checkboxes from the scrollable frame
-        for widget in self.scrollable_db_frame.winfo_children():
+        # Clear existing switches
+        for widget in self.db_list_frame.winfo_children():
             widget.destroy()
         self.database_vars.clear()
-        all_databases = list_databases()
 
-        # Filter databases based on the search term
+        all_databases = list_databases()
         filtered_databases = [db for db in all_databases if search_term.lower() in db.lower()]
 
-        num_columns = 6
-
-        for i in range(num_columns):
-            self.scrollable_db_frame.columnconfigure(i, weight=1)
-
-        # Database placement on grid shaped list
+        # Create checkboxes in the scrollable frame
+        # We use grid inside the scrollable frame for nice alignment
         for i, db_name in enumerate(filtered_databases):
-            # Calculate the row and column for the grid
-            row = i // num_columns
-            column = i % num_columns
-
-            var = tk.BooleanVar()
-            cb = tk.Checkbutton(self.scrollable_db_frame, text=db_name, variable=var)
-            cb.grid(row=row, column=column, sticky="w", padx=5, pady=2)
-
+            var = ctk.BooleanVar()
+            # Use CTkCheckBox
+            cb = ctk.CTkCheckBox(self.db_list_frame, text=db_name, variable=var)
+            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=10, pady=5)
             self.database_vars.append((var, db_name))
 
-    # Database search/browser
     def on_search_change(self, event=None):
         search_term = self.search_entry.get()
         self.load_databases_to_gui(search_term)
 
-    # Database embedding deletion selection function
     def delete_selected_databases(self):
         databases_to_delete = [name for var, name in self.database_vars if var.get()]
-
         if not databases_to_delete:
-            messagebox.showwarning("No Selection", "Please check the databases you want to delete.")
+            messagebox.showwarning("No Selection", "Please select databases to delete.")
             return
-        # Confirm choice to delete selected databases
-        confirm_message = "Are you sure you want to permanently delete the following databases?\n\n- " + "\n- ".join(
-            databases_to_delete)
+
+        confirm_message = "Permanently delete:\n\n- " + "\n- ".join(databases_to_delete)
         if messagebox.askyesno("Confirm Deletion", confirm_message):
             threading.Thread(target=self._perform_deletion, args=(databases_to_delete,), daemon=True).start()
 
-    # Database embedding deletion function
     def _perform_deletion(self, databases_to_delete):
         deleted_count = 0
         for db_name in databases_to_delete:
             try:
-                # Construct the full path e.g., "chroma/Title/Revision"
                 path_to_delete = os.path.join(READER_CONFIG["chroma_base_path"], db_name)
                 if os.path.exists(path_to_delete):
                     shutil.rmtree(path_to_delete)
-                    print(f"Deleted: {path_to_delete}")
                     deleted_count += 1
             except Exception as e:
-                messagebox.showerror("Deletion Error", f"Failed to delete {db_name}:\n{e}")
+                print(f"Error deleting {db_name}: {e}")
 
-        messagebox.showinfo("Success", f"Successfully deleted {deleted_count} database(s).")
-        # Refresh the GUI list from the main thread
-        self.root.after(0, self.load_databases_to_gui)
+        self.after(0, lambda: messagebox.showinfo("Success", f"Deleted {deleted_count} database(s)."))
+        self.after(0, self.load_databases_to_gui)
 
-    # Submitting the query into the machine
     def run_query(self):
         query_text = self.query_entry.get().strip()
         if not query_text:
@@ -337,32 +319,26 @@ class DocumentDatabaseGUI:
             return
         try:
             relevance = float(self.relevance_entry.get().strip())
-            temperature = float(self.temperature_entry.get().strip())
+            temperature = float(self.temp_entry.get().strip())
         except ValueError:
-            messagebox.showerror("Error", "Relevance and Temperature must be numbers.")
+            messagebox.showerror("Error", "Relevance/Temp must be numbers.")
             return
 
-        # Check to see if AI-assisted transform is used
         use_transform = self.query_transform_var.get()
-
-        # Correctly get selected databases from the potentially filtered list
         selected_dbs = [name for var, name in self.database_vars if var.get()]
         selected_db_str = "All" if not selected_dbs else ",".join(selected_dbs)
-
-        # Selected generator
         generator_name = self.selected_generator_model.get()
 
-        start_time = time.monotonic()  # Start the timer
-        self.clear_result_text()  # Clear the old answer
-        self.update_status_text("Starting query...")  # Set the initial status
+        start_time = time.monotonic()
+        self.clear_result_text()
+        self.update_status_text("Thinking...")
 
         threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
-                                                          use_transform, generator_name, start_time), daemon=True).start()
+                                                          use_transform, generator_name, start_time),
+                         daemon=True).start()
 
-    # LLM generation step
     def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name, start_time):
         try:
-            # The answer_question method returns a generator
             stream_generator = self.rag_pipeline.answer_question(
                 query_text=query_text,
                 selected_db=selected_db,
@@ -373,139 +349,108 @@ class DocumentDatabaseGUI:
                 generator_name=generator_name
             )
 
-            # Loop through the generator to get data as it's produced
             for item in stream_generator:
                 item_type = item.get("type")
                 item_data = item.get("data")
 
                 if item_type == "sources":
-                    # Received the sources, store them in our instance variable
                     self.current_sources = item_data
-
                 elif item_type == "suggestion":
                     self.display_suggestion(item_data)
-
                 elif item_type == "token":
-                    # Received a text token, append it to the GUI
                     self.append_to_result_text(item_data)
-
                 elif item_type == "error":
-                    # An error occurred, display it and stop
-                    self.update_result_text(f"An error occurred: {item_data}")
-                    return  # End the process here
+                    self.update_result_text(f"Error: {item_data}")
+                    return
 
-            # The stream is finished, calculate the time
             end_time = time.monotonic()
-            elapsed_seconds = int(end_time - start_time)
-
-            # Now, apply the citation tooltips to the full text
-            self.apply_citations(elapsed_seconds)
+            elapsed = int(end_time - start_time)
+            self.apply_citations(elapsed)
 
         except Exception as e:
-            # Handle unexpected errors during the process
-            self.update_result_text(f"A critical error occurred:\n{e}")
+            self.update_result_text(f"Critical Error:\n{e}")
         finally:
             self.update_status_text("Ready.")
 
-    # Update GUI text box via background thread
-    # Clear the text box
-    def clear_result_text(self):
-        self.result_text.config(state=tk.NORMAL)
-        self.result_text.delete("1.0", tk.END)
-        self.result_text.config(state=tk.DISABLED)
-        self.current_sources = []  # Reset sources for the new query
+    # --- UI Update Helpers ---
 
-    # Append streaming tokens to the text area
+    def clear_result_text(self):
+        self.result_text.configure(state=tk.NORMAL)
+        self.result_text.delete("1.0", tk.END)
+        self.result_text.configure(state=tk.DISABLED)
+        self.current_sources = []
+
     def append_to_result_text(self, token):
         def task():
-            self.result_text.config(state=tk.NORMAL)
+            self.result_text.configure(state=tk.NORMAL)
             self.result_text.insert(tk.END, token)
-            self.result_text.config(state=tk.DISABLED)
-            self.result_text.see(tk.END)  # Auto-scroll to the end
+            self.result_text.configure(state=tk.DISABLED)
+            self.result_text.see(tk.END)
 
-        self.root.after(0, task)
+        self.after(0, task)
 
     def update_result_text(self, text):
         def task():
             self.clear_result_text()
-            self.result_text.config(state=tk.NORMAL)
+            self.result_text.configure(state=tk.NORMAL)
             self.result_text.insert("1.0", text)
-            self.result_text.config(state=tk.DISABLED)
+            self.result_text.configure(state=tk.DISABLED)
 
-        self.root.after(0, task)
+        self.after(0, task)
 
     def display_suggestion(self, suggestions_list):
         def task():
-            if not suggestions_list:
-                return
-
+            if not suggestions_list: return
             try:
                 suggest_text = "\n".join(suggestions_list)
-
-                # Insert at "1.0" (the very top)
-                self.result_text.config(state=tk.NORMAL)
+                self.result_text.configure(state=tk.NORMAL)
                 self.result_text.insert(
                     "1.0",
-                    f"[SUGGESTION] For more context, try adding these databases to your search:\n{suggest_text}\n\n",
+                    f"💡 SUGGESTION: Try adding these databases:\n{suggest_text}\n\n",
                     "suggestion_tag"
                 )
-                self.result_text.config(state=tk.DISABLED)
+                self.result_text.configure(state=tk.DISABLED)
             except Exception as e:
-                print(f"Error displaying suggestion: {e}")
+                print(f"Suggestion error: {e}")
 
-        self.root.after(0, task)
+        self.after(0, task)
 
-    # Insert citations after generation completes
     def apply_citations(self, elapsed_seconds):
         def task():
-            self.result_text.config(state=tk.NORMAL)
-
-            # Get the full text from the widget
+            self.result_text.configure(state=tk.NORMAL)
             full_text = self.result_text.get("1.0", tk.END)
-
-            # Prepend the elapsed time
             prefix = f"({elapsed_seconds}s) "
             self.result_text.insert("1.0", prefix)
             full_text = prefix + full_text
 
-            # Configure the visual style for our citation "links"
-            self.result_text.tag_configure("citation_style", foreground="blue", underline=True)
-
-            # Find all citation markers like [1], [2], etc.
+            # Re-apply tags for citations
             for match in re.finditer(r'\[(\d+)\]', full_text):
                 start, end = match.span()
-                citation_num_str = match.group(1)
-                citation_index = int(citation_num_str) - 1
+                citation_index = int(match.group(1)) - 1
 
                 if 0 <= citation_index < len(self.current_sources):
                     source_text = self.current_sources[citation_index]['context']
-                    tag_name = f"citation-{start}"  # A unique tag for this specific link
+                    tag_name = f"citation-{start}"
 
+                    # Calculate CTk indices
                     start_index = f"1.0+{start}c"
                     end_index = f"1.0+{end}c"
 
                     self.result_text.tag_add("citation_style", start_index, end_index)
                     self.result_text.tag_add(tag_name, start_index, end_index)
 
-                    tooltip = ToolTip(self.result_text, text=source_text)
+                    tooltip = ModernToolTip(self.result_text, text=source_text)
                     self.result_text.tag_bind(tag_name, "<Enter>", lambda e, t=tooltip: t.show(e))
                     self.result_text.tag_bind(tag_name, "<Leave>", lambda e, t=tooltip: t.hide(e))
 
-            self.result_text.config(state=tk.DISABLED)
+            self.result_text.configure(state=tk.DISABLED)
 
-        self.root.after(0, task)
+        self.after(0, task)
 
-    # Update GUI status bar
     def update_status_text(self, text):
-        def task():
-            self.status_var.set(text)
+        self.after(0, lambda: self.status_var.set(text))
 
-        # Schedule the GUI update to run on the main Tkinter thread.
-        self.root.after(0, task)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DocumentDatabaseGUI(root)
-    root.mainloop()
-
-"I just ran a deliberate experiment to check the utility of the safety net. I uploaded two documents: One on Oil and Gas storage tanks and another with a little biography of myself. I selected the biography for the query but asked a storage tank related question. The program did the correct thing in terms of query response by indicating it was a low confidence result so no answer was given but it did not give the suggestion that the other document may be a better fit. Can we take a look at the order of these so that the program can provide the suggestion regardless of high, mid, or low confidence responses?"
+    app = DocumentDatabaseGUI()
+    app.mainloop()
