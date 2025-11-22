@@ -118,6 +118,7 @@ Advanced settings can be tweaked in the config dictionaries found in Ollama_Read
 Python
 
 CONFIG = {
+
     "retrieval_k": 60,        # Number of chunks to fetch per search method
     "top_k_results": 5,       # Max chunks sent to LLM
     "hybrid_rrf_k": 60,       # Fusion constant
