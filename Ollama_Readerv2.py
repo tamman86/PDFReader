@@ -10,6 +10,10 @@ import time
 import numpy as np
 from rank_bm25 import BM25Okapi
 from langchain_core.documents import Document
+import gc
+import redis
+import json
+import uuid
 
 # Program config settings
 CONFIG = {
@@ -46,7 +50,13 @@ CONFIG = {
     "extractor_confidence_threshold": 0.05,
     "retrieval_k": 60,
     "top_k_results": 5,
-    "hybrid_rrf_k": 60          # Reciprocal Rank Fusion Constant "k"
+    "hybrid_rrf_k": 60,          # Reciprocal Rank Fusion Constant "k"
+
+    # Redis cache Configuration
+    "enable_cache": True,
+    "cache_host": "localhost",
+    "cache_port": 6379,
+    "cache_similarity_threshold": 0.95      # Similarity required to use cache response
 }
 
 # Display all embedded databases
@@ -63,7 +73,6 @@ def list_databases():
                 if os.path.isdir(revision_path):
                     databases.append(f"{title}/{revision}")
     return databases
-
 
 def get_database_description(db_name: str) -> str:
     base_path = CONFIG["chroma_base_path"]
@@ -125,6 +134,11 @@ class RAGPipeline:
             self._extractor_pipelines[model_name] = pipeline("question-answering", model=model_path,
                                                              tokenizer=model_path, local_files_only=True)
         return self._extractor_pipelines[model_name]
+
+    # Helper to load the query embedder
+    def _load_embedder_model(self):
+        print("Loading Embedder Model...")
+        return self.embedding_function
 
     # Clear cached Embedder, Extractor, and Re-Ranker from GPU
     def _clear_cached_embedder(self):
@@ -234,10 +248,43 @@ Ideal Search Query:
     # Main engine to find relevant spans based on prompts and generate a Natural Language response
     def answer_question(self, query_text, selected_db="All", relevance_threshold=0.5, temperature=0.7,
                         generator_name="mistral-q4", use_query_transform=False, status_callback=None):
+
         high_confidence_threshold = 0.8
+        full_generated_answer = ""
+
         if status_callback: status_callback("Starting query process...")
 
         try:
+            # Initial check for "repeat" queries
+            print("Existing query Cache Check...")
+            self._load_embedder_model()
+
+            # Vectorize Query
+            query_vector = np.array(self.embedding_function.embed_query(query_text))
+
+            # Check the Cache
+            cached_answer, cached_sources = self._check_cache(query_vector, selected_db)
+
+            # If Cache Hit
+            if cached_answer:
+                # Similar query found in Cache
+                print("  -> Loading cached answer...")
+                if status_callback: status_callback("Cache hit! Loading answer...")
+
+                # Yield Sources
+                yield {"type": "sources", "data": cached_sources}
+
+                # Stream text response
+                for word in cached_answer.split():
+                    yield {"type": "token", "data": word + " "}
+                    time.sleep(0.02)
+
+                # Unload Embedder
+                self._clear_cached_embedder()
+                return
+
+            # If Cache Miss (Keep embedder loaded and proceed to regular generation process)
+
             # Step 1: Retrieval - Pull the most relevant chunks which apply to the query
             print("Step 1: Retrieving document chunks...")
             dbs = self._load_databases(selected_db)
@@ -261,11 +308,11 @@ Ideal Search Query:
                 if status_callback: status_callback("Step 1/4: Retrieving documents...")
                 retrieved_docs = self._retrieve_docs(dbs, query_text)
 
-            if not retrieved_docs: return "No documents were retrieved from the database.", []
-
-            ######## Setup the way to allow user to select if embedder uses RAM or VRAM to facilitate use of this
+            # Unload the embedder
             print("  -> Retrieval complete. Clearing embedder from VRAM...")
             self._clear_cached_embedder()
+
+            if not retrieved_docs: return "No documents were retrieved from the database.", []
 
             step_num = 3 if use_query_transform else 2
             total_steps = 5 if use_query_transform else 4
@@ -307,7 +354,9 @@ Ideal Search Query:
                 print(f"  -> ERROR in 'Safety Net' check: {e}")
 
             if not reranked_results:
-                return "No relevant results found after re-ranking.", []
+                msg = "No relevant documents found after re-ranking."
+                yield {"type": "error", "data": msg}
+                return
 
             best_score = reranked_results[0][1]
             confidence_level = "none"
@@ -315,8 +364,16 @@ Ideal Search Query:
 
             # For NO confidence results (score < 0.5)
             if best_score < relevance_threshold:
-                print(f"  -> Best score ({best_score:.4f}) is below low_confidence_threshold ({relevance_threshold}).")
-                return "I could not find any relevant information in the documents.", []
+                print(f"  -> Best score ({best_score:.4f}) is below relevance_threshold ({relevance_threshold}).")
+
+                refusal_message = "I could not find any relevant information in the documents based on your query."
+
+                for word in refusal_message.split():
+                   yield {"type": "token", "data": word + " "}
+                   time.sleep(0.02)
+
+                self._clear_cached_embedder()
+                return
 
             # For High confidence results (score > 0.8)
             elif best_score > high_confidence_threshold:
@@ -363,16 +420,28 @@ Ideal Search Query:
 
             # Step 4: Generation - Stream the answer
             print("Step 4: Generating final answer...")
-            # Use 'yield from' to pass all items from the _generate_answer generator
-            yield from self._generate_answer(query_text, top_extractions, generator_name, temperature, confidence_level)
+
+            # Generation loop to capture text
+            generator = self._generate_answer(query_text, top_extractions, generator_name,
+                                              temperature, confidence_level)
+
+            for item in generator:
+                yield item
+                if item['type'] == "token":
+                    full_generated_answer += item["data"]
+
+            # Save generated answer to cache
+            if full_generated_answer and len(full_generated_answer) > 20:
+                print("  -> Saving result to Cache...")
+                self._save_to_cache(query_text, query_vector, full_generated_answer, final_sources, selected_db)
 
             if status_callback: status_callback("Done.")
 
         except Exception as e:
             yield {"type": "error", "data": f"An error occurred: {e}"}
         finally:
-            # Clear generators when done
             self._clear_cached_generators()
+            self._clear_cached_embedder()
 
     # User selects which databases the query is to be applied to. No Selection = All Databases
     def _load_databases(self, selected_db):
@@ -673,6 +742,97 @@ Ideal Search Query:
         # Now a stream is used in place of a soild block of text response
         for token in llm.stream(generator_prompt):
             yield {"type": "token", "data": token}
+
+    def _get_cache_client(self):
+        if not self.config.get("enable_cache"):
+            return None
+        try:
+            client = redis.Redis(
+                host = self.config["cache_host"],
+                port = self.config["cache_port"],
+                decode_responses = False
+            )
+            client.ping()
+            return client
+        except Exception as e:
+            print(f"  [CACHE WARNING] Could not connect to Valkey: {e}")
+            return None
+
+    # Logic to Check Cache
+    def _check_cache(self, query_vector, selected_db):
+        client = self._get_cache_client()
+        if not client: return None, None
+
+        print("  -> Checking Cache for similar queries...")
+
+        # Scan keys in cache
+        keys = client.keys("rag_cache:*")
+
+        best_score = -1
+        best_entry = None
+
+        for key in keys:
+            try:
+                data_bytes = client.get(key)
+                if not data_bytes:
+                    continue
+
+                entry = json.loads(data_bytes.decode('utf-8'))
+
+                # Check if the same database is queried
+                if entry.get("selected_db") != selected_db:
+                    continue
+
+                # Check vector similarity
+                cached_vector = np.array(entry["vector"])
+
+                # Cosine Similarity
+                dot_product = np.dot(query_vector, cached_vector)
+                norm_q = np.linalg.norm(query_vector)
+                norm_c = np.linalg.norm(cached_vector)
+
+                if norm_q == 0 or norm_c == 0:
+                    score = 0
+                else:
+                    score = dot_product / (norm_q * norm_c)
+
+                if score > best_score:
+                    best_score = score
+                    best_entry = entry
+            except Exception:
+                continue    # Skip corrupted entries
+
+        # Check against the Similarity Threshold
+        if best_score >= self.config["cache_similarity_threshold"]:
+            print(f"  -> Cache HIT! Score: {best_score:.4f}")
+            return best_entry["answer"], best_entry["sources"]
+
+        print("  -> Cache MISS.")
+        return None, None
+
+    # Saving Redis/Valkey cache logic
+    def _save_to_cache(self, query_text, query_vector, answer_text, sources, selected_db):
+        client = self._get_cache_client()
+        if not client: return
+
+        try:
+            cache_id = str(uuid.uuid4())
+            key = f"rag_cache:{cache_id}"
+
+            data = {
+                "query": query_text,
+                "vector": query_vector.tolist(),
+                "answer": answer_text,
+                "sources": sources,
+                "selected_db": selected_db,
+                "timestamp": time.time()
+            }
+
+            # Save query vector and response
+            client.set(key, json.dumps(data))
+            print(f"  -> Saved response to Cache (Key: {key}")
+        except Exception as e:
+            print(f"  [CACHE ERROR] Failed to save: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Query documents using a RAG pipeline.")
