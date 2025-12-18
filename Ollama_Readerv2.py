@@ -100,22 +100,12 @@ class RAGPipeline:
         # Specify embedding function
         if self._embedding_function is None:
             print(f"Loading embedding model: {self.config['embedding_model']}...")
-
-            use_GPU = True
-            if use_GPU:
-                self._embedding_function = HuggingFaceEmbeddings(
-                    model_name = self.config["embedding_model"],
-                    encode_kwargs = {'normalize_embeddings': True}
-                )
-            else:
-                model_kwargs = {'device': 'cpu'}
+    #
+            self._embedding_function = HuggingFaceEmbeddings(
+                model_name = self.config["embedding_model"],
                 encode_kwargs = {'normalize_embeddings': True}
+            )
 
-                self._embedding_function = HuggingFaceEmbeddings(
-                    model_name=self.config["embedding_model"],
-                    model_kwargs = model_kwargs,
-                    encode_kwargs = encode_kwargs
-                )
         return self._embedding_function
 
     @property
@@ -135,45 +125,52 @@ class RAGPipeline:
                                                              tokenizer=model_path, local_files_only=True)
         return self._extractor_pipelines[model_name]
 
-    # Helper to load the query embedder
-    def _load_embedder_model(self):
-        print("Loading Embedder Model...")
-        return self.embedding_function
+    ### Packaging Embedder, Reranker, and Extractor Loaders ###
+    def load_retrieval_suite(self):
+        print("Loading retrieval suite (Embedder, Re-Ranker, and Extractor)...")
 
-    # Clear cached Embedder, Extractor, and Re-Ranker from GPU
-    def _clear_cached_embedder(self):
-        if self._embedding_function is None:
-            return
+        # Clear any active generators
+        self._clear_cached_generators()
 
-        print("Clearing embedding model from VRAM...")
+        # Load packaged models
+        _ = self.embedding_function
+        _ = self.reranker_model
+        for name in self.config["extractor_models"]:
+            self.get_extractor_pipeline(name)
 
-        try:
-            if hasattr(self._embedding_function, "client"):
-                del self._embedding_function.client
-            del self._embedding_function
+        print("✅ Retrieval Suite Loaded.")
 
-        except AttributeError:
+    def load_generation_suite(self, generator_name):
+        # Clear current retrieval suite to free up space
+        self._clear_retrieval_suite()
+
+        # Load the LLM
+        return self.get_generator_llm(generator_name)
+
+    ### Clearing Functions ###
+    def _clear_retrieval_suite(self):
+        print("Clearing Retrieval Suite from VRAM...")
+
+        # Unload Embedder
+        if self._embedding_function:
             try:
+                if hasattr(self._embedding_function, "client"):
+                    del self._embedding_function.client
                 del self._embedding_function
-            except Exception:
-                pass
-        except Exception as e:
-            pass
+            except Exception: pass
+            self._embedding_function = None
 
-        self._embedding_function = None
-        torch.cuda.empty_cache()
-        print("VRAM cleared.")
+        # Clear Reranker
+        if self._reranker_model:
+            del self._reranker_model
+            self._reranker_model = None
 
-    def _clear_cached_specialists(self):
-        if self._reranker_model is None and not self._extractor_pipelines:
-            return
-
-        print("Clearing specialist models (re-ranker, extractor) from VRAM...")
-        self._reranker_model = None
+        # Clear Extractors
         self._extractor_pipelines.clear()
 
+        # Final VRAM Purge
         torch.cuda.empty_cache()
-        print("VRAM cleared.")
+        print("Retrieval Suite Cleared!")
 
     def _clear_cached_generators(self):
         if not self._generator_llms:
@@ -185,18 +182,18 @@ class RAGPipeline:
             del self._generator_llms[key]
 
         torch.cuda.empty_cache()
-        print("VRAM cleared.")
+        print("Cached generator cleared!")
 
     def get_generator_llm(self, model_name):
         # Eject the specialists BEFORE loading the generator.
-        self._clear_cached_specialists()
+        self._clear_retrieval_suite()
 
         if model_name not in self._generator_llms:
             # Eject any other model that might be loaded.
             self._clear_cached_generators()
 
             model_info = self.config["generator_models"][model_name]
-            print(f"Loading generator model for the first time: {model_name}...")
+            print(f"Loading generator model: {model_name}...")
 
             if model_info["type"] == "gguf":
                 gguf_path = model_info["path"]
@@ -215,6 +212,8 @@ class RAGPipeline:
 
         # Return the model from the cache
         return self._generator_llms[model_name]
+
+    ### Query Helper Methods
 
     # User option to use LLM to help fine tune their query
     def _transform_query(self, query_text: str, status_callback=None) -> str:
@@ -237,13 +236,84 @@ User's Query:
 Ideal Search Query:
 """
         # Use the configured transformer model with a very low temperature for deterministic results
-        transformer_llm = self.get_generator_llm(self.config["query_transformer_model"])
+        transformer_llm = self.load_generation_suite(self.config["query_transformer_model"])
         transformer_llm.temperature = 0.01
         transformed_query = transformer_llm.invoke(prompt).strip()
 
         print(f"  -> Original Query:    '{query_text}'")
         print(f"  -> Transformed Query: '{transformed_query}'")
         return transformed_query
+
+    def _get_cache_client(self):
+        if not self.config.get("enable_cache"):
+            return None
+        try:
+            client = redis.Redis(host=self.config["cache_host"],
+                                 port=self.config["cache_port"],
+                                 decode_responses=False)
+            client.ping()
+            return client
+        except Exception as e:
+            print(f"  [CACHE WARNING] Could not connect to Valkey: {e}")
+            return None
+
+    def _check_cache(self, query_vector, selected_db):
+        client = self._get_cache_client()
+        if not client:
+            return None, None
+
+        keys = client.keys("rag_cache:*")
+        best_score = -1
+        best_entry = None
+
+        for key in keys:
+            try:
+                data_bytes = client.get(key)
+                if not data_bytes:
+                    continue
+                entry = json.loads(data_bytes.decode('utf-8'))
+                if entry.get("selected_db") != selected_db:
+                    continue
+
+                cached_vector = np.array(entry["vector"])
+                dot_product = np.dot(query_vector, cached_vector)
+                norm_q = np.linalg.norm(query_vector)
+                norm_c = np.linalg.norm(cached_vector)
+
+                score = 0 if (norm_q == 0 or norm_c == 0) else dot_product / (norm_q * norm_c)
+
+                if score > best_score:
+                    best_score = score
+                    best_entry = entry
+            except Exception:
+                continue
+
+        if best_score >= self.config["cache_similarity_threshold"]:
+            print(f"  -> Cache Hit! Score: {best_score:.4f}")
+            return best_entry["answer"], best_entry["sources"]
+        return None, None
+
+    def _save_to_cache(self, query_text, query_vector, answer_text, sources, selected_db):
+        client = self._get_cache_client()
+        if not client:
+            return
+        try:
+            cache_id = str(uuid.uuid4())
+            key = f"rag_cache:{cache_id}"
+            data = {
+                "query": query_text,
+                "vector": query_vector.tolist(),
+                "answer": answer_text,
+                "sources": sources,
+                "selected_db": selected_db,
+                "timestamp": time.time()
+            }
+            client.set(key, json.dumps(data))
+            print(f"  -> Saved response to Cache (Key: {key})")
+        except Exception as e:
+            print(f"  [CACHE ERROR] Failed to save: {e}")
+
+    ### Main RAG Pipeline ###
 
     # Main engine to find relevant spans based on prompts and generate a Natural Language response
     def answer_question(self, query_text, selected_db="All", relevance_threshold=0.5, temperature=0.7,
@@ -257,7 +327,7 @@ Ideal Search Query:
         try:
             # Initial check for "repeat" queries
             print("Existing query Cache Check...")
-            self._load_embedder_model()
+            self.load_retrieval_suite()
 
             # Vectorize Query
             query_vector = np.array(self.embedding_function.embed_query(query_text))
@@ -280,12 +350,13 @@ Ideal Search Query:
                     time.sleep(0.02)
 
                 # Unload Embedder
-                self._clear_cached_embedder()
+                #self._clear_retrieval_suite()
                 return
 
             # If Cache Miss (Keep embedder loaded and proceed to regular generation process)
 
             # Step 1: Retrieval - Pull the most relevant chunks which apply to the query
+            # Embedder will be already loaded from Valkey check
             print("Step 1: Retrieving document chunks...")
             dbs = self._load_databases(selected_db)
             if not dbs: return "Error: Could not load any valid databases.", []
@@ -294,7 +365,7 @@ Ideal Search Query:
             if use_query_transform:
                 print("  -> Using hybrid query approach.")
                 transformed_query = self._transform_query(query_text, status_callback)
-                if status_callback: status_callback("Step 2/5: Retrieving documents (Hybrid)...")
+                self.load_retrieval_suite()
 
                 # Retrieve for both original and transformed queries
                 original_results = self._retrieve_docs(dbs, query_text)
@@ -308,11 +379,9 @@ Ideal Search Query:
                 if status_callback: status_callback("Step 1/4: Retrieving documents...")
                 retrieved_docs = self._retrieve_docs(dbs, query_text)
 
-            # Unload the embedder
-            print("  -> Retrieval complete. Clearing embedder from VRAM...")
-            self._clear_cached_embedder()
-
-            if not retrieved_docs: return "No documents were retrieved from the database.", []
+            if not retrieved_docs:
+                yield {"type": "error", "data": "No documents retrieved."}
+                return
 
             step_num = 3 if use_query_transform else 2
             total_steps = 5 if use_query_transform else 4
@@ -335,7 +404,8 @@ Ideal Search Query:
 
                     for db_name in unselected_dbs:
                         summary = get_database_description(db_name)
-                        if not summary: continue
+                        if not summary:
+                            continue
 
                         # Use the already-loaded reranker model
                         pair = [query_text, summary]
@@ -359,7 +429,6 @@ Ideal Search Query:
                 return
 
             best_score = reranked_results[0][1]
-            confidence_level = "none"
             top_docs_with_scores = []
 
             # For NO confidence results (score < 0.5)
@@ -369,39 +438,22 @@ Ideal Search Query:
                 refusal_message = "I could not find any relevant information in the documents based on your query."
 
                 for word in refusal_message.split():
-                   yield {"type": "token", "data": word + " "}
-                   time.sleep(0.02)
+                    yield {"type": "token", "data": word + " "}
+                    time.sleep(0.02)
 
-                self._clear_cached_embedder()
                 return
 
-            # For High confidence results (score > 0.8)
-            elif best_score > high_confidence_threshold:
-                print(f"  -> Best score ({best_score:.4f}) is HIGH confidence.")
-                confidence_level = "high"
+            confidence_level = "high" if best_score > high_confidence_threshold else "low"
 
-                high_confidence_docs = [
-                    (doc, score) for doc, score in reranked_results
-                    if score >= high_confidence_threshold
-                ]
-                top_docs_with_scores = high_confidence_docs[:self.config["top_k_results"]]
+            high_confidence_docs = [doc for doc, score in reranked_results if score >= relevance_threshold]
+            top_docs_with_scores = list(
+                zip(high_confidence_docs, [s for d, s in reranked_results if s >= relevance_threshold]))[
+                                   :self.config["top_k_results"]]
 
-            # For Low confidence results (0.5 < score < 0.8)
-            else:
-                print(f"  -> Best score ({best_score:.4f}) is LOW confidence.")
-                confidence_level = "low"
 
-                low_confidence_docs = [
-                    (doc, score) for doc, score in reranked_results
-                    if score >= relevance_threshold
-                ]
 
-                top_docs_with_scores = low_confidence_docs[:self.config["top_k_results"]]
 
-            print(f"  -> Selected {len(top_docs_with_scores)} chunks for extraction.")
 
-            step_num += 1
-            if status_callback: status_callback(f"Step {step_num}/{total_steps}: Extracting specific answers...")
 
             # Step 3: Extraction - Pulling the info out of the ranked spans
             print("Step 3: Extracting specific answers...")
@@ -419,11 +471,22 @@ Ideal Search Query:
             if status_callback: status_callback(f"Step {step_num}/{total_steps}: Generating final answer...")
 
             # Step 4: Generation - Stream the answer
+
+            # Unload retrieval suite AND load LLM
+            llm_generator = self.load_generation_suite(generator_name)
             print("Step 4: Generating final answer...")
 
             # Generation loop to capture text
             generator = self._generate_answer(query_text, top_extractions, generator_name,
                                               temperature, confidence_level)
+
+
+
+
+
+
+
+
 
             for item in generator:
                 yield item
@@ -441,7 +504,7 @@ Ideal Search Query:
             yield {"type": "error", "data": f"An error occurred: {e}"}
         finally:
             self._clear_cached_generators()
-            self._clear_cached_embedder()
+            pass
 
     # User selects which databases the query is to be applied to. No Selection = All Databases
     def _load_databases(self, selected_db):
@@ -743,6 +806,7 @@ Ideal Search Query:
         for token in llm.stream(generator_prompt):
             yield {"type": "token", "data": token}
 
+    '''
     def _get_cache_client(self):
         if not self.config.get("enable_cache"):
             return None
@@ -833,7 +897,7 @@ Ideal Search Query:
             print(f"  -> Saved response to Cache (Key: {key}")
         except Exception as e:
             print(f"  [CACHE ERROR] Failed to save: {e}")
-
+    '''
 def main():
     parser = argparse.ArgumentParser(description="Query documents using a RAG pipeline.")
     parser.add_argument("query_text", type=str, help="The query text.")
