@@ -122,12 +122,18 @@ class DocumentDatabaseGUI(ctk.CTk):
         self.create_btn.grid(row=9, column=0, padx=20, pady=10, sticky="ew")
 
         # --- Section: Maintenance ---
-        # Spacer used in row 10
+        # Button to delete selected database(s)
         self.delete_btn = ctk.CTkButton(self.sidebar_frame, text="Delete Selected DBs",
                                         command=self.delete_selected_databases,
                                         fg_color="transparent", border_width=1, text_color="#FF5555",
                                         hover_color="#550000")
         self.delete_btn.grid(row=11, column=0, padx=20, pady=20, sticky="ew")
+
+        # Button to clear all Valkey caches
+        self.clear_cache_btn = ctk.CTkButton(self.sidebar_frame, text="Clear AI Response Cache",
+                                             command=self.clear_ai_cache,
+                                             fg_color="#800000", hover_color="#B22222")
+        self.clear_cache_btn.grid(row=12, column=0, padx=20, pady=10, sticky="ew")
 
         # ============================
         # RIGHT MAIN AREA (Query)
@@ -157,16 +163,25 @@ class DocumentDatabaseGUI(ctk.CTk):
         self.opts_frame = ctk.CTkFrame(self.query_frame, fg_color="transparent")
         self.opts_frame.pack(fill="x", padx=10, pady=5)
 
+        # Query Transform Option
         self.query_transform_var = ctk.BooleanVar(value=False)
         self.transform_check = ctk.CTkCheckBox(self.opts_frame, text="AI Query Transform",
                                                variable=self.query_transform_var)
         self.transform_check.pack(side="left", padx=10)
 
+        # Bypass Valkey Cache Check Option
+        self.use_cache_var = ctk.BooleanVar(value=True)
+        self.cache_check = ctk.CTkCheckBox(self.opts_frame, text="Use Cache",
+                                           variable=self.use_cache_var)
+        self.cache_check.pack(side="left", padx=10)
+
+        # Set Relevance Value
         self.relevance_entry = ctk.CTkEntry(self.opts_frame, width=60)
         self.relevance_entry.insert(0, "0.5")
         ctk.CTkLabel(self.opts_frame, text="Relevance:").pack(side="left", padx=(10, 5))
         self.relevance_entry.pack(side="left")
 
+        # Set Generator Temperature Value
         self.temp_entry = ctk.CTkEntry(self.opts_frame, width=60)
         self.temp_entry.insert(0, "0.2")
         ctk.CTkLabel(self.opts_frame, text="Temp:").pack(side="left", padx=(10, 5))
@@ -325,6 +340,7 @@ class DocumentDatabaseGUI(ctk.CTk):
             return
 
         use_transform = self.query_transform_var.get()
+        use_cache = self.use_cache_var.get()
         selected_dbs = [name for var, name in self.database_vars if var.get()]
         selected_db_str = "All" if not selected_dbs else ",".join(selected_dbs)
         generator_name = self.selected_generator_model.get()
@@ -334,10 +350,10 @@ class DocumentDatabaseGUI(ctk.CTk):
         self.update_status_text("Thinking...")
 
         threading.Thread(target=self.process_query, args=(query_text, selected_db_str, relevance, temperature,
-                                                          use_transform, generator_name, start_time),
+                                                          use_transform, use_cache, generator_name, start_time),
                          daemon=True).start()
 
-    def process_query(self, query_text, selected_db, relevance, temperature, use_transform, generator_name, start_time):
+    def process_query(self, query_text, selected_db, relevance, temperature, use_transform, use_cache, generator_name, start_time):
         try:
             stream_generator = self.rag_pipeline.answer_question(
                 query_text=query_text,
@@ -345,6 +361,7 @@ class DocumentDatabaseGUI(ctk.CTk):
                 relevance_threshold=relevance,
                 temperature=temperature,
                 use_query_transform=use_transform,
+                use_cache=use_cache,
                 status_callback=self.update_status_text,
                 generator_name=generator_name
             )
@@ -450,6 +467,29 @@ class DocumentDatabaseGUI(ctk.CTk):
     def update_status_text(self, text):
         self.after(0, lambda: self.status_var.set(text))
 
+    def clear_ai_cache(self):
+        # Check which databases the user has selected
+        selected_dbs = [name for var, name in self.database_vars if var.get()]
+
+        # If nothing selected, assume deleting ALL
+        if not selected_dbs:
+            if messagebox.askyesno("Clear All?", "No databases selected. Clear the ENTIRE cache?"):
+                self.update_status_text("Clearing entire cache...")
+                success = self.rag_pipeline.clear_entire_cache()
+                if success:
+                    messagebox.showinfo("Success", "Entire cache cleared.")
+                return
+
+        # Confirm targeted deletion
+        confirm_msg = f"Clear cached AI responses for:\n" + "\n".join(selected_dbs)
+        if messagebox.askyesno("Confirm Targeted Clear", confirm_msg):
+            self.update_status_text("Clearing targeted cache...")
+            success, count = self.rag_pipeline.clear_cache_by_databases(selected_dbs)
+
+            if success:
+                messagebox.showinfo("Success", f"Cleared {count} cached responses.")
+
+            self.update_status_text("Ready")
 
 if __name__ == "__main__":
     app = DocumentDatabaseGUI()

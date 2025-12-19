@@ -317,7 +317,7 @@ Ideal Search Query:
 
     # Main engine to find relevant spans based on prompts and generate a Natural Language response
     def answer_question(self, query_text, selected_db="All", relevance_threshold=0.5, temperature=0.7,
-                        generator_name="mistral-q4", use_query_transform=False, status_callback=None):
+                        generator_name="mistral-q4", use_query_transform=False, use_cache=True, status_callback=None):
 
         high_confidence_threshold = 0.8
         full_generated_answer = ""
@@ -332,26 +332,29 @@ Ideal Search Query:
             # Vectorize Query
             query_vector = np.array(self.embedding_function.embed_query(query_text))
 
-            # Check the Cache
-            cached_answer, cached_sources = self._check_cache(query_vector, selected_db)
+            if use_cache:
+                # Check the Cache
+                cached_answer, cached_sources = self._check_cache(query_vector, selected_db)
 
-            # If Cache Hit
-            if cached_answer:
-                # Similar query found in Cache
-                print("  -> Loading cached answer...")
-                if status_callback: status_callback("Cache hit! Loading answer...")
+                # If Cache Hit
+                if cached_answer:
+                    # Similar query found in Cache
+                    print("  -> Loading cached answer...")
+                    if status_callback: status_callback("Cache hit! Loading answer...")
 
-                # Yield Sources
-                yield {"type": "sources", "data": cached_sources}
+                    # Yield Sources
+                    yield {"type": "sources", "data": cached_sources}
 
-                # Stream text response
-                for word in cached_answer.split():
-                    yield {"type": "token", "data": word + " "}
-                    time.sleep(0.02)
+                    # Stream text response
+                    for word in cached_answer.split():
+                        yield {"type": "token", "data": word + " "}
+                        time.sleep(0.02)
 
-                # Unload Embedder
-                #self._clear_retrieval_suite()
-                return
+                    # Unload Embedder
+                    #self._clear_retrieval_suite()
+                    return
+            else:
+                print("  -> Cache bypassed by user.")
 
             # If Cache Miss (Keep embedder loaded and proceed to regular generation process)
 
@@ -480,14 +483,6 @@ Ideal Search Query:
             generator = self._generate_answer(query_text, top_extractions, generator_name,
                                               temperature, confidence_level)
 
-
-
-
-
-
-
-
-
             for item in generator:
                 yield item
                 if item['type'] == "token":
@@ -547,6 +542,45 @@ Ideal Search Query:
             else:
                 print(f"  -> WARNING: Database path not found '{db_name}'")
         return dbs
+
+    def clear_entire_cache(self):
+        # Delete ALL cached entries in Valkey database
+        client = self._get_cache_client()
+        if client:
+            try:
+                client.flushdb()
+                print("✅ Valkey Cache has been cleared successfully.")
+                return True
+            except Exception as e:
+                print(f"❌ Error clearing cache: {e}")
+                return False
+        return False
+
+    # Delete Valkey cache entries by selected database association
+    def clear_cache_by_databases(self, db_list_to_clear):
+        client = self._get_cache_client()
+        if not client:
+            return False
+
+        keys = client.keys("rag_cache:*")
+        deleted_count = 0
+
+        for key in keys:
+            try:
+                data_bytes = client.get(key)
+                if not data_bytes:
+                    continue
+
+                entry = json.loads(data_bytes.decode('utf-8'))
+
+                if entry.get("selected_db") in db_list_to_clear:
+                    client.delete(key)
+                    deleted_count += 1
+            except Exception:
+                continue
+
+        print(f"✅ Cleared {deleted_count} entries from cache for: {db_list_to_clear}")
+        return True, deleted_count
 
     def _retrieve_docs(self, dbs, query_text):
         RRF_K = self.config.get("hybrid_rrf_k", 60)
