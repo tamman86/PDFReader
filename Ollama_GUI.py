@@ -468,28 +468,48 @@ class DocumentDatabaseGUI(ctk.CTk):
         self.after(0, lambda: self.status_var.set(text))
 
     def clear_ai_cache(self):
+        # Get cache stats
+        self.update_status_text("Fetching cache stats...")
+        cache_stats = self.rag_pipeline.get_cache_stats()
+
         # Check which databases the user has selected
         selected_dbs = [name for var, name in self.database_vars if var.get()]
 
         # If nothing selected, assume deleting ALL
         if not selected_dbs:
-            if messagebox.askyesno("Clear All?", "No databases selected. Clear the ENTIRE cache?"):
-                self.update_status_text("Clearing entire cache...")
-                success = self.rag_pipeline.clear_entire_cache()
-                if success:
-                    messagebox.showinfo("Success", "Entire cache cleared.")
+            total_items = sum(cache_stats.values())
+            if total_items == 0:
+                messagebox.showinfo("Cache Empty", "There are no responses in this cache to clear.")
+                self.update_status_text("Ready")
                 return
 
-        # Confirm targeted deletion
-        confirm_msg = f"Clear cached AI responses for:\n" + "\n".join(selected_dbs)
+            if messagebox.askyesno("Clear All?", "No databases selected. Clear the ENTIRE cache?"):
+                self.rag_pipeline.clear_entire_cache()
+                messagebox.showinfo("Success", "Entire cache cleared.")
+            self.update_status_text("Ready")
+            return
+
+        lines = []
+        total_to_delete = 0
+        for db in selected_dbs:
+            count = cache_stats.get(db, 0)
+            lines.append(f" • {db} - ({count} entries)")
+            total_to_delete += count
+
+        if total_to_delete == 0:
+            messagebox.showinfo("Nothing to Clear", "Selected databases have no cached responses.")
+            self.update_status_text("Ready.")
+            return
+
+        confirm_msg = f"Permanently clear {total_to_delete} cached responses for:\n\n" + "\n".join(lines)
+
         if messagebox.askyesno("Confirm Targeted Clear", confirm_msg):
             self.update_status_text("Clearing targeted cache...")
-            success, count = self.rag_pipeline.clear_cache_by_databases(selected_dbs)
-
+            success, deleted = self.rag_pipeline.clear_cache_by_databases(selected_dbs)
             if success:
-                messagebox.showinfo("Success", f"Cleared {count} cached responses.")
+                messagebox.showinfo("Success", f"Cleared {deleted} cached responses.")
 
-            self.update_status_text("Ready")
+        self.update_status_text("Ready.")
 
 if __name__ == "__main__":
     app = DocumentDatabaseGUI()

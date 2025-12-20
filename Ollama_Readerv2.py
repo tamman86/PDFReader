@@ -1,4 +1,5 @@
 import os
+import re
 import argparse
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -345,13 +346,12 @@ Ideal Search Query:
                     # Yield Sources
                     yield {"type": "sources", "data": cached_sources}
 
-                    # Stream text response
-                    for word in cached_answer.split():
-                        yield {"type": "token", "data": word + " "}
-                        time.sleep(0.02)
+                    tokens = re.split(r'(\s+)', cached_answer)
 
-                    # Unload Embedder
-                    #self._clear_retrieval_suite()
+                    for token in tokens:
+                        yield {"type": "token", "data": token}
+                        time.sleep(0.005)
+
                     return
             else:
                 print("  -> Cache bypassed by user.")
@@ -560,7 +560,7 @@ Ideal Search Query:
     def clear_cache_by_databases(self, db_list_to_clear):
         client = self._get_cache_client()
         if not client:
-            return False
+            return False, 0
 
         keys = client.keys("rag_cache:*")
         deleted_count = 0
@@ -581,6 +581,28 @@ Ideal Search Query:
 
         print(f"✅ Cleared {deleted_count} entries from cache for: {db_list_to_clear}")
         return True, deleted_count
+
+    # Return a dictionary showing how many entries exist for each database
+    def get_cache_stats(self):
+        client = self._get_cache_client()
+        if not client:
+            return {}
+
+        keys = client.keys("rag_cache:*")
+        stats = {}
+
+        for key in keys:
+            try:
+                data_bytes = client.get(key)
+                if not data_bytes:
+                    continue
+                entry = json.loads(data_bytes.decode('utf-8'))
+                db_context = entry.get("selected_db", "Unknown")
+
+                stats[db_context] = stats.get(db_context, 0) + 1
+            except Exception:
+                continue
+        return stats
 
     def _retrieve_docs(self, dbs, query_text):
         RRF_K = self.config.get("hybrid_rrf_k", 60)
@@ -840,98 +862,6 @@ Ideal Search Query:
         for token in llm.stream(generator_prompt):
             yield {"type": "token", "data": token}
 
-    '''
-    def _get_cache_client(self):
-        if not self.config.get("enable_cache"):
-            return None
-        try:
-            client = redis.Redis(
-                host = self.config["cache_host"],
-                port = self.config["cache_port"],
-                decode_responses = False
-            )
-            client.ping()
-            return client
-        except Exception as e:
-            print(f"  [CACHE WARNING] Could not connect to Valkey: {e}")
-            return None
-
-    # Logic to Check Cache
-    def _check_cache(self, query_vector, selected_db):
-        client = self._get_cache_client()
-        if not client: return None, None
-
-        print("  -> Checking Cache for similar queries...")
-
-        # Scan keys in cache
-        keys = client.keys("rag_cache:*")
-
-        best_score = -1
-        best_entry = None
-
-        for key in keys:
-            try:
-                data_bytes = client.get(key)
-                if not data_bytes:
-                    continue
-
-                entry = json.loads(data_bytes.decode('utf-8'))
-
-                # Check if the same database is queried
-                if entry.get("selected_db") != selected_db:
-                    continue
-
-                # Check vector similarity
-                cached_vector = np.array(entry["vector"])
-
-                # Cosine Similarity
-                dot_product = np.dot(query_vector, cached_vector)
-                norm_q = np.linalg.norm(query_vector)
-                norm_c = np.linalg.norm(cached_vector)
-
-                if norm_q == 0 or norm_c == 0:
-                    score = 0
-                else:
-                    score = dot_product / (norm_q * norm_c)
-
-                if score > best_score:
-                    best_score = score
-                    best_entry = entry
-            except Exception:
-                continue    # Skip corrupted entries
-
-        # Check against the Similarity Threshold
-        if best_score >= self.config["cache_similarity_threshold"]:
-            print(f"  -> Cache HIT! Score: {best_score:.4f}")
-            return best_entry["answer"], best_entry["sources"]
-
-        print("  -> Cache MISS.")
-        return None, None
-
-    # Saving Redis/Valkey cache logic
-    def _save_to_cache(self, query_text, query_vector, answer_text, sources, selected_db):
-        client = self._get_cache_client()
-        if not client: return
-
-        try:
-            cache_id = str(uuid.uuid4())
-            key = f"rag_cache:{cache_id}"
-
-            data = {
-                "query": query_text,
-                "vector": query_vector.tolist(),
-                "answer": answer_text,
-                "sources": sources,
-                "selected_db": selected_db,
-                "timestamp": time.time()
-            }
-
-            # Save query vector and response
-            client.set(key, json.dumps(data))
-            print(f"  -> Saved response to Cache (Key: {key}")
-        except Exception as e:
-            print(f"  [CACHE ERROR] Failed to save: {e}")
-    '''
 def main():
     parser = argparse.ArgumentParser(description="Query documents using a RAG pipeline.")
     parser.add_argument("query_text", type=str, help="The query text.")
